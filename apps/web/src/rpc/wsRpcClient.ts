@@ -10,6 +10,8 @@ import {
   type IosSimulatorInteractResult,
   type IosSimulatorProjectState,
   type IosSimulatorProjectStateInput,
+  type IosSimulatorRuntimeEvent,
+  type IosSimulatorSubscribeEventsInput,
   type LocalApi,
   ORCHESTRATION_WS_METHODS,
   type ServerSettingsPatch,
@@ -87,6 +89,11 @@ export interface WsRpcClient {
     readonly getState: (input: IosSimulatorProjectStateInput) => Promise<IosSimulatorProjectState>;
     readonly boot: (input: IosSimulatorBootInput) => Promise<IosSimulatorBootResult>;
     readonly interact: (input: IosSimulatorInteractInput) => Promise<IosSimulatorInteractResult>;
+    readonly subscribeEvents: (
+      input: IosSimulatorSubscribeEventsInput,
+      listener: (event: IosSimulatorRuntimeEvent) => void,
+      options?: StreamSubscriptionOptions,
+    ) => () => void;
   };
   readonly git: {
     readonly pull: RpcUnaryMethod<typeof WS_METHODS.gitPull>;
@@ -172,6 +179,12 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       boot: (input) => transport.request((client) => client[WS_METHODS.simulatorBoot](input)),
       interact: (input) =>
         transport.request((client) => client[WS_METHODS.simulatorInteract](input)),
+      subscribeEvents: (input, listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.simulatorSubscribeEvents](input),
+          listener,
+          options,
+        ),
     },
     git: {
       pull: (input) => transport.request((client) => client[WS_METHODS.gitPull](input)),

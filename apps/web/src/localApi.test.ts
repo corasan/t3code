@@ -33,6 +33,7 @@ function registerListener<T>(listeners: Set<(event: T) => void>, listener: (even
 const terminalEventListeners = new Set<(event: TerminalEvent) => void>();
 const shellStreamListeners = new Set<(event: OrchestrationShellStreamItem) => void>();
 const gitStatusListeners = new Set<(event: GitStatusResult) => void>();
+const simulatorEventListeners = new Set<(event: unknown) => void>();
 
 const rpcClientMock = {
   dispose: vi.fn(),
@@ -53,6 +54,15 @@ const rpcClientMock = {
   },
   filesystem: {
     browse: vi.fn(),
+  },
+  simulator: {
+    getState: vi.fn(),
+    boot: vi.fn(),
+    interact: vi.fn(),
+    subscribeEvents: vi.fn((input: unknown, listener: (event: unknown) => void) => {
+      void input;
+      return registerListener(simulatorEventListeners, listener);
+    }),
   },
   shell: {
     openInEditor: vi.fn(),
@@ -378,6 +388,20 @@ describe("wsApi", () => {
     api.orchestration.subscribeShell(onShellEvent, { onResubscribe });
 
     expect(rpcClientMock.orchestration.subscribeShell).toHaveBeenCalledWith(onShellEvent, {
+      onResubscribe,
+    });
+  });
+
+  it("forwards simulator event stream subscription options to the RPC client", async () => {
+    const { createEnvironmentApi } = await import("./environmentApi");
+
+    const api = createEnvironmentApi(rpcClientMock as never);
+    const onSimulatorEvent = vi.fn();
+    const onResubscribe = vi.fn();
+
+    api.simulator.subscribeEvents({}, onSimulatorEvent, { onResubscribe });
+
+    expect(rpcClientMock.simulator.subscribeEvents).toHaveBeenCalledWith({}, onSimulatorEvent, {
       onResubscribe,
     });
   });

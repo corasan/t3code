@@ -786,6 +786,10 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           observeRpcEffect(WS_METHODS.simulatorInteract, iosSimulator.interact(input), {
             "rpc.aggregate": "simulator",
           }),
+        [WS_METHODS.simulatorSubscribeEvents]: (_input) =>
+          observeRpcStream(WS_METHODS.simulatorSubscribeEvents, iosSimulator.streamRuntimeEvents, {
+            "rpc.aggregate": "simulator",
+          }),
         [WS_METHODS.projectsSearchEntries]: (input) =>
           observeRpcEffect(
             WS_METHODS.projectsSearchEntries,

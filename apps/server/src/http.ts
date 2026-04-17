@@ -239,23 +239,35 @@ export const iosSimulatorStreamRouteLayer = HttpRouter.add(
     }
 
     const iosSimulator = yield* IosSimulator;
-    const responseOrStream = yield* iosSimulator.createMjpegStream({ udid }).pipe(
-      Effect.match({
-        onFailure: (error) => HttpServerResponse.text(error.message, { status: 409 }),
-        onSuccess: (stream) =>
-          HttpServerResponse.fromWeb(
-            new Response(stream, {
-              status: 200,
-              headers: {
-                "Cache-Control": "no-store, no-transform",
-                Connection: "keep-alive",
-                "Content-Type": `multipart/x-mixed-replace; boundary=${IOS_SIMULATOR_MJPEG_BOUNDARY}`,
-                "X-Accel-Buffering": "no",
-              },
-            }),
-          ),
-      }),
-    );
+    const abortSignal =
+      request.source &&
+      typeof request.source === "object" &&
+      "signal" in request.source &&
+      request.source.signal instanceof AbortSignal
+        ? request.source.signal
+        : undefined;
+    const responseOrStream = yield* iosSimulator
+      .createMjpegStream({
+        udid,
+        ...(abortSignal ? { signal: abortSignal } : {}),
+      })
+      .pipe(
+        Effect.match({
+          onFailure: (error) => HttpServerResponse.text(error.message, { status: 409 }),
+          onSuccess: (stream) =>
+            HttpServerResponse.fromWeb(
+              new Response(stream, {
+                status: 200,
+                headers: {
+                  "Cache-Control": "no-store, no-transform",
+                  Connection: "keep-alive",
+                  "Content-Type": `multipart/x-mixed-replace; boundary=${IOS_SIMULATOR_MJPEG_BOUNDARY}`,
+                  "X-Accel-Buffering": "no",
+                },
+              }),
+            ),
+        }),
+      );
 
     return responseOrStream;
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),

@@ -27,6 +27,8 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       getState: rpcClient.simulator.getState,
       boot: rpcClient.simulator.boot,
       interact: rpcClient.simulator.interact,
+      subscribeEvents: (input, callback, options) =>
+        rpcClient.simulator.subscribeEvents(input, callback, options),
     },
     git: {
       pull: rpcClient.git.pull,

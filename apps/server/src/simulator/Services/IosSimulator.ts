@@ -1,5 +1,5 @@
 import { Context } from "effect";
-import type { Effect } from "effect";
+import type { Effect, Stream } from "effect";
 import type {
   IosSimulatorBootInput,
   IosSimulatorBootResult,
@@ -7,6 +7,7 @@ import type {
   IosSimulatorInteractResult,
   IosSimulatorProjectState,
   IosSimulatorProjectStateInput,
+  IosSimulatorRuntimeEvent,
   SimulatorError,
 } from "@t3tools/contracts";
 
@@ -23,7 +24,9 @@ export interface IosSimulatorShape {
   readonly createMjpegStream: (input: {
     readonly udid: string;
     readonly intervalMs?: number;
+    readonly signal?: AbortSignal;
   }) => Effect.Effect<ReadableStream<Uint8Array>, SimulatorError>;
+  readonly streamRuntimeEvents: Stream.Stream<IosSimulatorRuntimeEvent>;
 }
 
 export class IosSimulator extends Context.Service<IosSimulator, IosSimulatorShape>()(

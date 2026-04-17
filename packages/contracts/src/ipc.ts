@@ -47,6 +47,8 @@ import type {
   IosSimulatorInteractResult,
   IosSimulatorProjectState,
   IosSimulatorProjectStateInput,
+  IosSimulatorRuntimeEvent,
+  IosSimulatorSubscribeEventsInput,
 } from "./simulator.ts";
 import type { ServerUpsertKeybindingInput } from "./server.ts";
 import type {
@@ -301,5 +303,12 @@ export interface EnvironmentApi {
     getState: (input: IosSimulatorProjectStateInput) => Promise<IosSimulatorProjectState>;
     boot: (input: IosSimulatorBootInput) => Promise<IosSimulatorBootResult>;
     interact: (input: IosSimulatorInteractInput) => Promise<IosSimulatorInteractResult>;
+    subscribeEvents: (
+      input: IosSimulatorSubscribeEventsInput,
+      callback: (event: IosSimulatorRuntimeEvent) => void,
+      options?: {
+        onResubscribe?: () => void;
+      },
+    ) => () => void;
   };
 }

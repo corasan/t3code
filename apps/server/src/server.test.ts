@@ -100,6 +100,7 @@ import {
   ServerEnvironment,
   type ServerEnvironmentShape,
 } from "./environment/Services/ServerEnvironment.ts";
+import { IosSimulator, type IosSimulatorShape } from "./simulator/Services/IosSimulator.ts";
 import { WorkspaceEntriesLive } from "./workspace/Layers/WorkspaceEntries.ts";
 import { WorkspaceFileSystemLive } from "./workspace/Layers/WorkspaceFileSystem.ts";
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
@@ -335,6 +336,7 @@ const buildAppUnderTest = (options?: {
     serverRuntimeStartup?: Partial<ServerRuntimeStartupShape>;
     serverEnvironment?: Partial<ServerEnvironmentShape>;
     repositoryIdentityResolver?: Partial<RepositoryIdentityResolverShape>;
+    iosSimulator?: Partial<IosSimulatorShape>;
   };
 }) =>
   Effect.gen(function* () {
@@ -537,6 +539,42 @@ const buildAppUnderTest = (options?: {
         Layer.mock(RepositoryIdentityResolver)({
           resolve: () => Effect.succeed(null),
           ...options?.layers?.repositoryIdentityResolver,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(IosSimulator)({
+          getProjectState: () =>
+            Effect.succeed({
+              supported: false,
+              supportReason: "Simulator unavailable in test.",
+              isExpoProject: false,
+              devices: [],
+              bootedDeviceUdid: null,
+              preferredDeviceUdid: null,
+            }),
+          boot: () =>
+            Effect.succeed({
+              device: {
+                udid: "test-simulator",
+                name: "iPhone Test",
+                runtime: "iOS 18.0",
+                state: "booted",
+                isAvailable: true,
+                lastBootedAt: null,
+              },
+            }),
+          interact: () => Effect.succeed({ ok: true }),
+          createMjpegStream: () => Effect.succeed(new ReadableStream<Uint8Array>()),
+          streamRuntimeEvents: Stream.make({
+            version: 1 as const,
+            sequence: 0,
+            type: "snapshot" as const,
+            snapshot: {
+              devices: [],
+              logs: [],
+            },
+          }),
+          ...options?.layers?.iosSimulator,
         }),
       ),
       Layer.provideMerge(authTestLayer),
@@ -2004,6 +2042,80 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(first?.sequence, 1);
         assert.equal(second?.type, "ready");
         assert.equal(second?.sequence, 2);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "routes websocket rpc simulator.subscribeEvents replays snapshot and streams updates",
+    () =>
+      Effect.gen(function* () {
+        yield* buildAppUnderTest({
+          layers: {
+            iosSimulator: {
+              streamRuntimeEvents: Stream.concat(
+                Stream.make({
+                  version: 1 as const,
+                  sequence: 3,
+                  type: "snapshot" as const,
+                  snapshot: {
+                    devices: [
+                      {
+                        udid: "sim-1",
+                        lifecycleState: "ready",
+                        interactionReady: true,
+                        streamReady: false,
+                        frameStatus: "connecting",
+                        viewerCount: 1,
+                        frameCount: 0,
+                        firstFrameAt: null,
+                        lastFrameAt: null,
+                        inputStatus: "idle",
+                        lastInputKind: null,
+                        lastInputAt: null,
+                        lastError: null,
+                      },
+                    ],
+                    logs: [],
+                  },
+                }),
+                Stream.make({
+                  version: 1 as const,
+                  sequence: 4,
+                  createdAt: "2026-04-17T12:00:01.000Z",
+                  type: "frameState" as const,
+                  payload: {
+                    udid: "sim-1",
+                    status: "live" as const,
+                    viewerCount: 1,
+                    frameCount: 1,
+                    firstFrameAt: "2026-04-17T12:00:01.000Z",
+                    lastFrameAt: "2026-04-17T12:00:01.000Z",
+                    reason: null,
+                  },
+                }),
+              ),
+            },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const events = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.simulatorSubscribeEvents]({}).pipe(Stream.take(2), Stream.runCollect),
+          ),
+        );
+
+        const [first, second] = Array.from(events);
+        assert.equal(first?.type, "snapshot");
+        if (first?.type === "snapshot") {
+          assert.equal(first.snapshot.devices[0]?.udid, "sim-1");
+          assert.equal(first.snapshot.devices[0]?.lifecycleState, "ready");
+        }
+        assert.equal(second?.type, "frameState");
+        if (second?.type === "frameState") {
+          assert.equal(second.payload.status, "live");
+          assert.equal(second.payload.frameCount, 1);
+        }
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

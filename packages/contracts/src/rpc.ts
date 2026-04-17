@@ -83,6 +83,8 @@ import {
   IosSimulatorInteractResult,
   IosSimulatorProjectState,
   IosSimulatorProjectStateInput,
+  IosSimulatorRuntimeEvent,
+  IosSimulatorSubscribeEventsInput,
   SimulatorError,
 } from "./simulator.ts";
 
@@ -132,6 +134,7 @@ export const WS_METHODS = {
   simulatorGetState: "simulator.getState",
   simulatorBoot: "simulator.boot",
   simulatorInteract: "simulator.interact",
+  simulatorSubscribeEvents: "simulator.subscribeEvents",
 
   // Streaming subscriptions
   subscribeGitStatus: "subscribeGitStatus",
@@ -186,6 +189,12 @@ export const WsSimulatorInteractRpc = Rpc.make(WS_METHODS.simulatorInteract, {
   payload: IosSimulatorInteractInput,
   success: IosSimulatorInteractResult,
   error: SimulatorError,
+});
+
+export const WsSimulatorSubscribeEventsRpc = Rpc.make(WS_METHODS.simulatorSubscribeEvents, {
+  payload: IosSimulatorSubscribeEventsInput,
+  success: IosSimulatorRuntimeEvent,
+  stream: true,
 });
 
 export const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
@@ -396,6 +405,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsSimulatorGetStateRpc,
   WsSimulatorBootRpc,
   WsSimulatorInteractRpc,
+  WsSimulatorSubscribeEventsRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
   WsShellOpenInEditorRpc,

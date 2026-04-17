@@ -260,7 +260,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   serverEnvironmentRouteLayer,
   staticAndDevRouteLayer,
   websocketRpcRouteLayer,
-).pipe(Layer.provideMerge(IosSimulatorLive), Layer.provide(browserApiCorsLayer));
+).pipe(Layer.provide(browserApiCorsLayer));
 
 export const makeServerLayer = Layer.unwrap(
   Effect.gen(function* () {

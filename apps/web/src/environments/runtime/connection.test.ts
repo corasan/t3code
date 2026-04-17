@@ -81,6 +81,19 @@ function createTestClient() {
       searchEntries: vi.fn(async () => []),
       writeFile: vi.fn(async () => undefined),
     },
+    simulator: {
+      getState: vi.fn(async () => ({
+        supported: true,
+        supportReason: null,
+        isExpoProject: true,
+        devices: [],
+        bootedDeviceUdid: null,
+        preferredDeviceUdid: null,
+      })),
+      boot: vi.fn(async () => undefined),
+      interact: vi.fn(async () => ({ ok: true })),
+      subscribeEvents: vi.fn(() => () => undefined),
+    },
     shell: {
       openInEditor: vi.fn(async () => undefined),
     },

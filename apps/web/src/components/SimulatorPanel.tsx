@@ -1,4 +1,5 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, IosSimulatorDevice } from "@t3tools/contracts";
+import { createEmptyIosSimulatorRuntimeState } from "@t3tools/shared/simulatorRuntime";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   LoaderIcon,
@@ -24,8 +25,18 @@ import {
   iosSimulatorStateQueryOptions,
   simulatorQueryKeys,
 } from "~/lib/simulatorReactQuery";
+import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { cn } from "~/lib/utils";
 
+import { resolveSelectedIosSimulatorDeviceUdid } from "./SimulatorPanel.logic";
+import {
+  getSimulatorPanelLogTail,
+  hasSimulatorBootSignal,
+  isSimulatorFrameStale,
+  readSimulatorPanelRuntimeDevice,
+  reduceSimulatorPanelRuntimeState,
+  shouldAutoReconnectSimulatorStream,
+} from "./SimulatorPanel.runtime";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
@@ -46,6 +57,7 @@ interface DragState {
 }
 
 const DRAG_DISTANCE_THRESHOLD = 0.015;
+const EMPTY_IOS_SIMULATOR_DEVICES: ReadonlyArray<IosSimulatorDevice> = [];
 const SPECIAL_KEY_MAP = new Set([
   "Enter",
   "Tab",
@@ -80,6 +92,52 @@ function isDragGesture(input: DragState): boolean {
   return Math.hypot(deltaX, deltaY) >= DRAG_DISTANCE_THRESHOLD;
 }
 
+function formatSimulatorStatusLabel(value: string | null | undefined): string {
+  return (value ?? "idle").replaceAll("-", " ");
+}
+
+function getSimulatorStatusClass(value: string | null | undefined): string {
+  switch (value) {
+    case "ready":
+    case "streaming":
+    case "live":
+    case "succeeded":
+      return "border-emerald-400/20 bg-emerald-400/10 text-emerald-200";
+    case "booting":
+    case "connecting":
+    case "dispatching":
+      return "border-amber-300/20 bg-amber-300/10 text-amber-100";
+    case "error":
+    case "failed":
+    case "stale":
+      return "border-rose-400/20 bg-rose-400/10 text-rose-100";
+    default:
+      return "border-white/10 bg-white/5 text-slate-200/70";
+  }
+}
+
+function RuntimeStatusBadge({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: string | null;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] uppercase tracking-wide",
+        getSimulatorStatusClass(tone ?? value),
+      )}
+    >
+      <span className="text-slate-300/60">{label}</span>
+      <span className="capitalize">{formatSimulatorStatusLabel(value)}</span>
+    </span>
+  );
+}
+
 const SimulatorPanel = memo(function SimulatorPanel({
   environmentId,
   projectCwd,
@@ -89,8 +147,11 @@ const SimulatorPanel = memo(function SimulatorPanel({
   const queryClient = useQueryClient();
   const viewportRef = useRef<HTMLImageElement | null>(null);
   const dragStateRef = useRef<DragState | null>(null);
-  const [selectedDeviceUdid, setSelectedDeviceUdid] = useState<string | null>(null);
+  const autoRefreshSignatureRef = useRef<string | null>(null);
+  const [requestedDeviceUdid, setRequestedDeviceUdid] = useState<string | null>(null);
+  const [runtimeState, setRuntimeState] = useState(createEmptyIosSimulatorRuntimeState);
   const [streamVersion, setStreamVersion] = useState(0);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const simulatorStateQuery = useQuery({
     ...iosSimulatorStateQueryOptions({
@@ -102,32 +163,35 @@ const SimulatorPanel = memo(function SimulatorPanel({
   });
 
   const simulatorState = simulatorStateQuery.data ?? null;
-  const devices = simulatorState?.devices ?? [];
+  const devices = simulatorState?.devices ?? EMPTY_IOS_SIMULATOR_DEVICES;
   const bootedDeviceUdid = simulatorState?.bootedDeviceUdid ?? null;
-
-  useEffect(() => {
-    if (!devices.length) {
-      setSelectedDeviceUdid(null);
-      return;
-    }
-    if (selectedDeviceUdid && devices.some((device) => device.udid === selectedDeviceUdid)) {
-      return;
-    }
-    setSelectedDeviceUdid(
-      bootedDeviceUdid ?? simulatorState?.preferredDeviceUdid ?? devices[0]?.udid ?? null,
-    );
-  }, [bootedDeviceUdid, devices, selectedDeviceUdid, simulatorState?.preferredDeviceUdid]);
+  const selectedDeviceUdid = resolveSelectedIosSimulatorDeviceUdid({
+    devices,
+    requestedDeviceUdid,
+    bootedDeviceUdid,
+    preferredDeviceUdid: simulatorState?.preferredDeviceUdid ?? null,
+  });
 
   const selectedDevice = useMemo(
     () => devices.find((device) => device.udid === selectedDeviceUdid) ?? null,
     [devices, selectedDeviceUdid],
   );
+  const selectedRuntimeDevice = readSimulatorPanelRuntimeDevice(runtimeState, selectedDeviceUdid);
+  const hasBootedSignal = hasSimulatorBootSignal({
+    deviceState: selectedDevice?.state,
+    runtimeDevice: selectedRuntimeDevice,
+  });
+  const frameStale = isSimulatorFrameStale(selectedRuntimeDevice, nowMs);
+  const runtimeLogTail = useMemo(
+    () => getSimulatorPanelLogTail(runtimeState, selectedDeviceUdid),
+    [runtimeState, selectedDeviceUdid],
+  );
 
   const streamUrl =
-    selectedDevice && selectedDevice.state === "booted"
+    selectedDeviceUdid && hasBootedSignal
       ? buildIosSimulatorStreamUrl({
-          udid: selectedDevice.udid,
-          cacheKey: `${selectedDevice.udid}:${streamVersion}`,
+          udid: selectedDeviceUdid,
+          cacheKey: `${selectedDeviceUdid}:${streamVersion}`,
         })
       : null;
 
@@ -137,11 +201,61 @@ const SimulatorPanel = memo(function SimulatorPanel({
     });
   }, [environmentId, projectCwd, queryClient]);
 
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    setRuntimeState(createEmptyIosSimulatorRuntimeState());
+    const unsubscribe = ensureEnvironmentApi(environmentId).simulator.subscribeEvents(
+      {},
+      (event) => {
+        setRuntimeState((current) => reduceSimulatorPanelRuntimeState(current, event));
+      },
+      {
+        onResubscribe: () => {
+          void invalidateSimulatorState();
+        },
+      },
+    );
+    return unsubscribe;
+  }, [environmentId, invalidateSimulatorState]);
+
+  useEffect(() => {
+    autoRefreshSignatureRef.current = null;
+  }, [selectedDeviceUdid]);
+
+  useEffect(() => {
+    const shouldReconnect = shouldAutoReconnectSimulatorStream({
+      runtimeDevice: selectedRuntimeDevice,
+      nowMs,
+    });
+    if (!shouldReconnect || !streamUrl || !selectedDeviceUdid) {
+      autoRefreshSignatureRef.current = null;
+      return;
+    }
+
+    const signature = [
+      selectedDeviceUdid,
+      selectedRuntimeDevice?.frameStatus ?? "idle",
+      selectedRuntimeDevice?.lastFrameAt ?? "never",
+      String(selectedRuntimeDevice?.frameCount ?? 0),
+    ].join(":");
+    if (autoRefreshSignatureRef.current === signature) {
+      return;
+    }
+
+    autoRefreshSignatureRef.current = signature;
+    setStreamVersion((current) => current + 1);
+    void invalidateSimulatorState();
+  }, [invalidateSimulatorState, nowMs, selectedDeviceUdid, selectedRuntimeDevice, streamUrl]);
+
   const bootMutation = useMutation({
     mutationFn: async (udid: string) =>
       ensureEnvironmentApi(environmentId).simulator.boot({ udid }),
     onSuccess: async (result) => {
-      setSelectedDeviceUdid(result.device.udid);
+      setRequestedDeviceUdid(result.device.udid);
       setStreamVersion((current) => current + 1);
       await invalidateSimulatorState();
     },
@@ -176,9 +290,10 @@ const SimulatorPanel = memo(function SimulatorPanel({
           title: "Simulator input failed",
           description: error instanceof Error ? error.message : "An error occurred.",
         });
+        void invalidateSimulatorState();
       }
     },
-    [environmentId, selectedDeviceUdid],
+    [environmentId, invalidateSimulatorState, selectedDeviceUdid],
   );
 
   const handlePointerDown = useCallback((event: PointerEvent<HTMLImageElement>) => {
@@ -258,6 +373,33 @@ const SimulatorPanel = memo(function SimulatorPanel({
 
   const eligible = Boolean(simulatorState?.supported && simulatorState.isExpoProject);
   const canRenderStream = Boolean(streamUrl);
+  const lifecycleValue =
+    selectedRuntimeDevice?.lifecycleState ??
+    (selectedDevice?.state === "booted" ? "ready" : (selectedDevice?.state ?? "idle"));
+  const interactionValue = selectedRuntimeDevice?.interactionReady
+    ? "ready"
+    : bootMutation.isPending
+      ? "booting"
+      : "idle";
+  const streamValue = frameStale
+    ? "stale"
+    : (selectedRuntimeDevice?.frameStatus ?? (canRenderStream ? "connecting" : "idle"));
+  const inputValue = selectedRuntimeDevice?.inputStatus ?? "idle";
+  const streamOverlayMessage = !canRenderStream
+    ? null
+    : frameStale || selectedRuntimeDevice?.frameStatus === "live"
+      ? null
+      : (selectedRuntimeDevice?.lastError ?? "Connecting to the live simulator stream...");
+  const lastFrameLabel = selectedRuntimeDevice?.lastFrameAt
+    ? `Last frame ${formatRelativeTimeLabel(selectedRuntimeDevice.lastFrameAt)}`
+    : canRenderStream
+      ? "Waiting for first frame"
+      : "Idle";
+  const runtimeSummary = selectedRuntimeDevice
+    ? `${selectedRuntimeDevice.frameCount} frames • ${selectedRuntimeDevice.viewerCount} viewer${
+        selectedRuntimeDevice.viewerCount === 1 ? "" : "s"
+      }`
+    : "Waiting for runtime events";
 
   return (
     <div className={cn("flex min-h-0 flex-col bg-card/50", shellClassName)}>
@@ -308,7 +450,7 @@ const SimulatorPanel = memo(function SimulatorPanel({
           <Select
             value={selectedDeviceUdid ?? ""}
             onValueChange={(value) => {
-              setSelectedDeviceUdid(value);
+              setRequestedDeviceUdid(value);
               setStreamVersion((current) => current + 1);
             }}
             disabled={!devices.length}
@@ -375,20 +517,38 @@ const SimulatorPanel = memo(function SimulatorPanel({
               <div className="flex items-center gap-2 text-[11px] text-slate-300/70">
                 <SmartphoneIcon className="size-3.5" />
                 <span>{selectedDevice?.runtime ?? "iOS Simulator"}</span>
+                <span className="text-slate-400/60">{lastFrameLabel}</span>
               </div>
               <Badge
                 variant="outline"
                 className={cn(
                   "border-white/10 bg-white/5 text-[10px] uppercase tracking-wide text-slate-200/70",
-                  selectedDevice?.state === "booted" &&
-                    "border-emerald-400/20 bg-emerald-400/10 text-emerald-200",
+                  getSimulatorStatusClass(lifecycleValue),
                 )}
               >
-                {selectedDevice?.state ?? "idle"}
+                {formatSimulatorStatusLabel(lifecycleValue)}
               </Badge>
             </div>
 
+            <div className="mb-3 flex flex-wrap gap-1.5 px-1">
+              <RuntimeStatusBadge label="Lifecycle" value={lifecycleValue} />
+              <RuntimeStatusBadge
+                label="Bridge"
+                value={interactionValue}
+                tone={selectedRuntimeDevice?.interactionReady ? "ready" : interactionValue}
+              />
+              <RuntimeStatusBadge label="Stream" value={streamValue} />
+              <RuntimeStatusBadge label="Input" value={inputValue} />
+            </div>
+
             <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-[1.4rem] border border-white/10 bg-black/70">
+              {streamOverlayMessage ? (
+                <div className="pointer-events-none absolute inset-x-4 top-4 z-10 flex justify-center">
+                  <div className="rounded-full border border-white/10 bg-black/70 px-3 py-1 text-[11px] text-slate-200/85 shadow-lg backdrop-blur">
+                    {streamOverlayMessage}
+                  </div>
+                </div>
+              ) : null}
               {canRenderStream ? (
                 <img
                   key={streamUrl}
@@ -404,6 +564,7 @@ const SimulatorPanel = memo(function SimulatorPanel({
                   onKeyDown={handleKeyDown}
                   onError={() => {
                     setStreamVersion((current) => current + 1);
+                    void invalidateSimulatorState();
                   }}
                 />
               ) : (
@@ -434,6 +595,41 @@ const SimulatorPanel = memo(function SimulatorPanel({
                       Boot And Open
                     </Button>
                   ) : null}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-3 shrink-0 rounded-[1.1rem] border border-white/10 bg-black/25 p-3">
+              <div className="mb-2 flex items-center justify-between gap-2 text-[10px] uppercase tracking-[0.18em] text-slate-400/70">
+                <span>Runtime</span>
+                <span>{runtimeSummary}</span>
+              </div>
+              {runtimeLogTail.length === 0 ? (
+                <p className="text-[11px] text-slate-300/60">
+                  Waiting for simulator lifecycle, readiness, frame, and input events.
+                </p>
+              ) : (
+                <div className="max-h-28 space-y-1 overflow-auto font-mono text-[10px] leading-4 text-slate-200/75">
+                  {runtimeLogTail.map((entry) => (
+                    <div key={`${entry.sequence}:${entry.createdAt}`} className="flex gap-2">
+                      <span
+                        className={cn(
+                          "shrink-0 uppercase",
+                          entry.level === "error"
+                            ? "text-rose-200/90"
+                            : entry.level === "warn"
+                              ? "text-amber-100/90"
+                              : "text-emerald-100/90",
+                        )}
+                      >
+                        {entry.level}
+                      </span>
+                      <span className="shrink-0 text-slate-400/70">
+                        {formatRelativeTimeLabel(entry.createdAt)}
+                      </span>
+                      <span className="min-w-0 break-words text-slate-200/80">{entry.message}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
