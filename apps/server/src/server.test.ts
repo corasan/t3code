@@ -564,7 +564,7 @@ const buildAppUnderTest = (options?: {
               },
             }),
           interact: () => Effect.succeed({ ok: true }),
-          createMjpegStream: () => Effect.succeed(new ReadableStream<Uint8Array>()),
+          createVideoStream: () => Effect.succeed(new ReadableStream<Uint8Array>()),
           streamRuntimeEvents: Stream.make({
             version: 1 as const,
             sequence: 0,

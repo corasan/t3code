@@ -21,7 +21,7 @@ import { resolveStaticDir, ServerConfig } from "./config.ts";
 import { decodeOtlpTraceRecords } from "./observability/TraceRecord.ts";
 import { BrowserTraceCollector } from "./observability/Services/BrowserTraceCollector.ts";
 import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolver.ts";
-import { IOS_SIMULATOR_MJPEG_BOUNDARY } from "./simulator/Layers/IosSimulator.ts";
+import { IOS_SIMULATOR_VIDEO_CONTENT_TYPE } from "./simulator/Layers/IosSimulator.ts";
 import { IosSimulator } from "./simulator/Services/IosSimulator.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { respondToAuthError } from "./auth/http.ts";
@@ -247,7 +247,7 @@ export const iosSimulatorStreamRouteLayer = HttpRouter.add(
         ? request.source.signal
         : undefined;
     const responseOrStream = yield* iosSimulator
-      .createMjpegStream({
+      .createVideoStream({
         udid,
         ...(abortSignal ? { signal: abortSignal } : {}),
       })
@@ -261,7 +261,7 @@ export const iosSimulatorStreamRouteLayer = HttpRouter.add(
                 headers: {
                   "Cache-Control": "no-store, no-transform",
                   Connection: "keep-alive",
-                  "Content-Type": `multipart/x-mixed-replace; boundary=${IOS_SIMULATOR_MJPEG_BOUNDARY}`,
+                  "Content-Type": IOS_SIMULATOR_VIDEO_CONTENT_TYPE,
                   "X-Accel-Buffering": "no",
                 },
               }),

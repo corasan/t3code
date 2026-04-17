@@ -104,6 +104,17 @@ const IosSimulatorPointerDragInput = Schema.Struct({
   toY: NormalizedPointerCoordinate,
 });
 
+export const IosSimulatorPointerPhase = Schema.Literals(["began", "moved", "ended"]);
+export type IosSimulatorPointerPhase = typeof IosSimulatorPointerPhase.Type;
+
+const IosSimulatorPointerStreamInput = Schema.Struct({
+  kind: Schema.Literal("pointer"),
+  udid: TrimmedNonEmptyString,
+  phase: IosSimulatorPointerPhase,
+  x: NormalizedPointerCoordinate,
+  y: NormalizedPointerCoordinate,
+});
+
 const IosSimulatorTypeTextInput = Schema.Struct({
   kind: Schema.Literal("type"),
   udid: TrimmedNonEmptyString,
@@ -116,12 +127,13 @@ const IosSimulatorPressKeyInput = Schema.Struct({
   key: TrimmedNonEmptyString,
 });
 
-export const IosSimulatorInputKind = Schema.Literals(["tap", "drag", "type", "press"]);
+export const IosSimulatorInputKind = Schema.Literals(["tap", "drag", "pointer", "type", "press"]);
 export type IosSimulatorInputKind = typeof IosSimulatorInputKind.Type;
 
 export const IosSimulatorInteractInput = Schema.Union([
   IosSimulatorPointerTapInput,
   IosSimulatorPointerDragInput,
+  IosSimulatorPointerStreamInput,
   IosSimulatorTypeTextInput,
   IosSimulatorPressKeyInput,
 ]);

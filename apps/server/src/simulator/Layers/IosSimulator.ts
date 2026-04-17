@@ -28,8 +28,7 @@ import { Effect, Layer, PubSub, Ref, Schema, Stream } from "effect";
 import { runProcess } from "../../processRunner.ts";
 import { IosSimulator, type IosSimulatorShape } from "../Services/IosSimulator.ts";
 
-const DEFAULT_STREAM_FPS = 30;
-const MJPEG_BOUNDARY = "t3code-ios-simulator-frame";
+const DEFAULT_STREAM_FPS = 60;
 const EXPO_CONFIG_CANDIDATES = [
   "app.json",
   "app.config.js",
@@ -42,7 +41,7 @@ const IOS_RUNTIME_RE = /\bios\b/i;
 const SIMULATOR_BRIDGE_SOURCE_PATH = fileURLToPath(
   new URL("../bin/SimulatorBridge.swift", import.meta.url),
 );
-const SIMULATOR_BRIDGE_BINARY_NAME = "t3code-simulator-device-bridge-v4";
+const SIMULATOR_BRIDGE_BINARY_NAME = "t3code-simulator-device-bridge-v5";
 const FRAME_STATE_HEARTBEAT_MS = 1_000;
 const INITIAL_STREAM_FRAME_TIMEOUT_MS = 10_000;
 const STREAM_STALL_TIMEOUT_MS = 5_000;
@@ -59,11 +58,6 @@ interface SimctlDeviceJson {
   readonly lastBootedAt?: string;
 }
 
-interface LengthPrefixedFrameState {
-  buffer: Buffer;
-  expectedLength: number | null;
-}
-
 interface SimulatorBridgeResponse {
   readonly id: number | null;
   readonly type: "ready" | "response";
@@ -75,7 +69,8 @@ interface SimulatorInteractionDaemon {
   readonly child: ReturnType<typeof spawn>;
   readonly output: readline.Interface;
   readonly send: (command: {
-    readonly kind: "tap" | "drag" | "type" | "press";
+    readonly kind: "tap" | "drag" | "pointer" | "type" | "press";
+    readonly phase?: "began" | "moved" | "ended";
     readonly x?: number;
     readonly y?: number;
     readonly fromX?: number;
@@ -99,7 +94,6 @@ interface StreamRuntimeState {
   frameCount: number;
   firstFrameAt: string | null;
   lastFrameAt: string | null;
-  lastEncodedFrame: Uint8Array | null;
   status: "idle" | "connecting" | "live" | "closed" | "error";
 }
 
@@ -349,15 +343,6 @@ export function selectPreferredIosSimulatorDevice(
   })[0]!;
 }
 
-function encodeMjpegFrame(frame: Uint8Array): Uint8Array {
-  const header = Buffer.from(
-    `--${MJPEG_BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.byteLength}\r\n\r\n`,
-    "utf8",
-  );
-  const footer = Buffer.from("\r\n", "utf8");
-  return Buffer.concat([header, Buffer.from(frame), footer]);
-}
-
 async function resolveSimulatorBridgeBinaryPath(): Promise<string> {
   if (simulatorBridgeBinaryPathPromise) {
     return simulatorBridgeBinaryPathPromise;
@@ -383,14 +368,17 @@ async function resolveSimulatorBridgeBinaryPath(): Promise<string> {
       await runProcess(
         "swiftc",
         [
+          "-O",
           "-framework",
           "CoreGraphics",
           "-framework",
-          "CoreImage",
+          "CoreMedia",
+          "-framework",
+          "CoreVideo",
           "-framework",
           "IOSurface",
           "-framework",
-          "ImageIO",
+          "VideoToolbox",
           SIMULATOR_BRIDGE_SOURCE_PATH,
           "-o",
           binaryPath,
@@ -636,34 +624,6 @@ async function ensureInteractionDaemon(
   return await created;
 }
 
-function parseLengthPrefixedFrames(
-  state: LengthPrefixedFrameState,
-  chunk: Buffer,
-): ReadonlyArray<Buffer> {
-  state.buffer = state.buffer.length === 0 ? chunk : Buffer.concat([state.buffer, chunk]);
-  const frames: Buffer[] = [];
-
-  for (;;) {
-    if (state.expectedLength === null) {
-      if (state.buffer.length < 4) {
-        break;
-      }
-      state.expectedLength = state.buffer.readUInt32BE(0);
-      state.buffer = state.buffer.subarray(4);
-    }
-
-    if (state.buffer.length < state.expectedLength) {
-      break;
-    }
-
-    frames.push(state.buffer.subarray(0, state.expectedLength));
-    state.buffer = state.buffer.subarray(state.expectedLength);
-    state.expectedLength = null;
-  }
-
-  return frames;
-}
-
 function isExpectedSimctlBootError(stderr: string): boolean {
   return /current state:\s*booted|already booted/i.test(stderr);
 }
@@ -828,7 +788,6 @@ function makeIosSimulator(input: {
       frameCount: 0,
       firstFrameAt: null,
       lastFrameAt: null,
-      lastEncodedFrame: null,
       status: "idle",
     };
     streamStates.set(udid, created);
@@ -925,11 +884,20 @@ function makeIosSimulator(input: {
 
   const interact: IosSimulatorShape["interact"] = (interactInput) =>
     Effect.tryPromise(async (): Promise<IosSimulatorInteractResult> => {
-      input.runtimeEvents.inputState({
-        udid: interactInput.udid,
-        inputKind: interactInput.kind,
-        status: "dispatching",
-      });
+      // Intermediate pointer-move frames would flood the event bus and log
+      // tail at ~60Hz. We only publish lifecycle-worthy transitions
+      // (gesture start, gesture end, and failures).
+      const shouldEmitInputState = !(
+        interactInput.kind === "pointer" && interactInput.phase === "moved"
+      );
+
+      if (shouldEmitInputState) {
+        input.runtimeEvents.inputState({
+          udid: interactInput.udid,
+          inputKind: interactInput.kind,
+          status: "dispatching",
+        });
+      }
 
       try {
         if (!supported) {
@@ -959,6 +927,14 @@ function makeIosSimulator(input: {
               toY: interactInput.toY,
             });
             break;
+          case "pointer":
+            await daemon.send({
+              kind: "pointer",
+              phase: interactInput.phase,
+              x: interactInput.x,
+              y: interactInput.y,
+            });
+            break;
           case "type":
             await daemon.send({
               kind: "type",
@@ -973,11 +949,13 @@ function makeIosSimulator(input: {
             break;
         }
 
-        input.runtimeEvents.inputState({
-          udid: interactInput.udid,
-          inputKind: interactInput.kind,
-          status: "succeeded",
-        });
+        if (shouldEmitInputState) {
+          input.runtimeEvents.inputState({
+            udid: interactInput.udid,
+            inputKind: interactInput.kind,
+            status: "succeeded",
+          });
+        }
         return { ok: true };
       } catch (cause) {
         const error = isSimulatorError(cause)
@@ -999,7 +977,7 @@ function makeIosSimulator(input: {
       }
     });
 
-  const createMjpegStream: IosSimulatorShape["createMjpegStream"] = (streamInput) =>
+  const createVideoStream: IosSimulatorShape["createVideoStream"] = (streamInput) =>
     Effect.tryPromise(async () => {
       if (!supported) {
         throw createSimulatorError(supportReason ?? "iOS Simulator support is unavailable.");
@@ -1007,7 +985,7 @@ function makeIosSimulator(input: {
 
       const binaryPath = await resolveSimulatorBridgeBinaryPath();
       const targetIntervalMs = streamInput.intervalMs ?? Math.round(1000 / DEFAULT_STREAM_FPS);
-      const fps = Math.max(1, Math.round(1000 / Math.max(16, targetIntervalMs)));
+      const fps = Math.max(1, Math.round(1000 / Math.max(8, targetIntervalMs)));
       const abortSignal = streamInput.signal;
 
       let child: ReturnType<typeof spawn> | null = null;
@@ -1132,10 +1110,6 @@ function makeIosSimulator(input: {
             status: current.liveViewerCount > 0 ? "live" : "connecting",
           }));
 
-          if (initialState.lastEncodedFrame) {
-            controller.enqueue(initialState.lastEncodedFrame);
-          }
-
           input.runtimeEvents.frameState({
             udid: streamInput.udid,
             status: initialState.status,
@@ -1165,11 +1139,40 @@ function makeIosSimulator(input: {
             stdio: "pipe",
           });
           child = streamChild;
-          const parseState: LengthPrefixedFrameState = {
-            buffer: Buffer.alloc(0),
-            expectedLength: null,
-          };
+          // The Swift bridge emits length-prefixed H.264 access units. We
+          // forward every raw chunk verbatim and count AUs on the fly so
+          // the UI heartbeat reflects actual frame delivery.
+          let pendingAccessUnitBytes = 0;
+          let countingCarry = Buffer.alloc(0);
           let stderr = "";
+
+          const countAccessUnits = (chunk: Buffer): number => {
+            let units = 0;
+            const buffer =
+              countingCarry.length === 0 ? chunk : Buffer.concat([countingCarry, chunk]);
+            let offset = 0;
+            while (true) {
+              if (pendingAccessUnitBytes === 0) {
+                if (buffer.length - offset < 4) {
+                  break;
+                }
+                pendingAccessUnitBytes = buffer.readUInt32BE(offset);
+                offset += 4;
+              }
+              const available = buffer.length - offset;
+              if (available < pendingAccessUnitBytes) {
+                offset += available;
+                pendingAccessUnitBytes -= available;
+                break;
+              }
+              offset += pendingAccessUnitBytes;
+              pendingAccessUnitBytes = 0;
+              units += 1;
+            }
+            countingCarry =
+              offset >= buffer.length ? Buffer.alloc(0) : Buffer.from(buffer.subarray(offset));
+            return units;
+          };
 
           const scheduleStartupFrameTimeout = () => {
             startupFrameTimeout = setTimeout(() => {
@@ -1200,62 +1203,65 @@ function makeIosSimulator(input: {
               return;
             }
             const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-            for (const frame of parseLengthPrefixedFrames(parseState, buffer)) {
-              const encodedFrame = encodeMjpegFrame(frame);
-              controller.enqueue(encodedFrame);
+            if (buffer.length === 0) {
+              return;
+            }
+            controller.enqueue(new Uint8Array(buffer));
 
-              const now = new Date();
-              const nowIso = now.toISOString();
-              const nowMs = now.getTime();
-              const isFirstFrame = !firstFrameDelivered;
+            const framesInChunk = countAccessUnits(buffer);
+            if (framesInChunk === 0 && firstFrameDelivered) {
+              return;
+            }
+            const now = new Date();
+            const nowIso = now.toISOString();
+            const nowMs = now.getTime();
+            const isFirstFrame = !firstFrameDelivered;
+            if (framesInChunk > 0) {
               firstFrameDelivered = true;
-              if (isFirstFrame && startupFrameTimeout) {
-                clearTimeout(startupFrameTimeout);
-                startupFrameTimeout = null;
-              }
-              scheduleStallTimeout();
+            }
+            if (isFirstFrame && startupFrameTimeout) {
+              clearTimeout(startupFrameTimeout);
+              startupFrameTimeout = null;
+            }
+            scheduleStallTimeout();
 
-              const nextState = updateStreamState(streamInput.udid, (current) => ({
-                ...current,
-                liveViewerCount: isFirstFrame
-                  ? current.liveViewerCount + 1
-                  : current.liveViewerCount,
-                frameCount: current.frameCount + 1,
-                firstFrameAt: current.firstFrameAt ?? nowIso,
-                lastFrameAt: nowIso,
-                lastEncodedFrame: encodedFrame,
-                status: "live",
-              }));
+            const nextState = updateStreamState(streamInput.udid, (current) => ({
+              ...current,
+              liveViewerCount: isFirstFrame ? current.liveViewerCount + 1 : current.liveViewerCount,
+              frameCount: current.frameCount + framesInChunk,
+              firstFrameAt: current.firstFrameAt ?? nowIso,
+              lastFrameAt: nowIso,
+              status: "live",
+            }));
 
-              if (isFirstFrame && nextState.liveViewerCount === 1) {
-                input.runtimeEvents.readiness({
-                  udid: streamInput.udid,
-                  source: "stream",
-                  ready: true,
-                });
-                input.runtimeEvents.lifecycle({
-                  udid: streamInput.udid,
-                  state: "streaming",
-                });
-                input.runtimeEvents.log({
-                  level: "info",
-                  source: "stream-bridge",
-                  udid: streamInput.udid,
-                  message: `Simulator stream is live for ${streamInput.udid}.`,
-                });
-              }
+            if (isFirstFrame && nextState.liveViewerCount === 1) {
+              input.runtimeEvents.readiness({
+                udid: streamInput.udid,
+                source: "stream",
+                ready: true,
+              });
+              input.runtimeEvents.lifecycle({
+                udid: streamInput.udid,
+                state: "streaming",
+              });
+              input.runtimeEvents.log({
+                level: "info",
+                source: "stream-bridge",
+                udid: streamInput.udid,
+                message: `Simulator stream is live for ${streamInput.udid}.`,
+              });
+            }
 
-              if (isFirstFrame || nowMs - lastFrameStatePublishedAt >= FRAME_STATE_HEARTBEAT_MS) {
-                lastFrameStatePublishedAt = nowMs;
-                input.runtimeEvents.frameState({
-                  udid: streamInput.udid,
-                  status: nextState.status,
-                  viewerCount: nextState.viewerCount,
-                  frameCount: nextState.frameCount,
-                  firstFrameAt: nextState.firstFrameAt,
-                  lastFrameAt: nextState.lastFrameAt,
-                });
-              }
+            if (isFirstFrame || nowMs - lastFrameStatePublishedAt >= FRAME_STATE_HEARTBEAT_MS) {
+              lastFrameStatePublishedAt = nowMs;
+              input.runtimeEvents.frameState({
+                udid: streamInput.udid,
+                status: nextState.status,
+                viewerCount: nextState.viewerCount,
+                frameCount: nextState.frameCount,
+                firstFrameAt: nextState.firstFrameAt,
+                lastFrameAt: nextState.lastFrameAt,
+              });
             }
           });
 
@@ -1316,7 +1322,7 @@ function makeIosSimulator(input: {
     getProjectState,
     boot,
     interact,
-    createMjpegStream,
+    createVideoStream,
     streamRuntimeEvents: input.runtimeEvents.stream,
   } satisfies IosSimulatorShape;
 }
@@ -1333,4 +1339,8 @@ export const IosSimulatorLive = Layer.effect(
   }),
 );
 
-export const IOS_SIMULATOR_MJPEG_BOUNDARY = MJPEG_BOUNDARY;
+/**
+ * Custom wire type marker for the length-prefixed H.264 Annex-B access unit
+ * stream. Pinned here so server and client stay in lockstep.
+ */
+export const IOS_SIMULATOR_VIDEO_CONTENT_TYPE = "application/vnd.t3code.h264-annex-b";

@@ -20,6 +20,7 @@ import {
 } from "react";
 
 import { ensureEnvironmentApi } from "~/environmentApi";
+import { isH264StreamPlayerSupported, startH264StreamPlayer } from "~/lib/h264StreamPlayer";
 import {
   buildIosSimulatorStreamUrl,
   iosSimulatorStateQueryOptions,
@@ -49,14 +50,15 @@ interface SimulatorPanelProps {
   onClose: () => void;
 }
 
-interface DragState {
-  startX: number;
-  startY: number;
+interface PointerGestureState {
+  pointerId: number;
   latestX: number;
   latestY: number;
+  sendInFlight: boolean;
+  pendingPosition: { x: number; y: number } | null;
+  ended: boolean;
 }
 
-const DRAG_DISTANCE_THRESHOLD = 0.015;
 const EMPTY_IOS_SIMULATOR_DEVICES: ReadonlyArray<IosSimulatorDevice> = [];
 const SPECIAL_KEY_MAP = new Set([
   "Enter",
@@ -72,6 +74,8 @@ const SPECIAL_KEY_MAP = new Set([
   "End",
 ]);
 
+const webCodecsSupported = isH264StreamPlayerSupported();
+
 function normalizePointerPosition(
   element: HTMLElement,
   clientX: number,
@@ -84,12 +88,6 @@ function normalizePointerPosition(
   const x = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
   const y = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
   return { x, y };
-}
-
-function isDragGesture(input: DragState): boolean {
-  const deltaX = input.latestX - input.startX;
-  const deltaY = input.latestY - input.startY;
-  return Math.hypot(deltaX, deltaY) >= DRAG_DISTANCE_THRESHOLD;
 }
 
 function formatSimulatorStatusLabel(value: string | null | undefined): string {
@@ -145,8 +143,8 @@ const SimulatorPanel = memo(function SimulatorPanel({
   onClose,
 }: SimulatorPanelProps) {
   const queryClient = useQueryClient();
-  const viewportRef = useRef<HTMLImageElement | null>(null);
-  const dragStateRef = useRef<DragState | null>(null);
+  const viewportRef = useRef<HTMLCanvasElement | null>(null);
+  const gestureRef = useRef<PointerGestureState | null>(null);
   const autoRefreshSignatureRef = useRef<string | null>(null);
   const [requestedDeviceUdid, setRequestedDeviceUdid] = useState<string | null>(null);
   const [runtimeState, setRuntimeState] = useState(createEmptyIosSimulatorRuntimeState);
@@ -188,7 +186,7 @@ const SimulatorPanel = memo(function SimulatorPanel({
   );
 
   const streamUrl =
-    selectedDeviceUdid && hasBootedSignal
+    selectedDeviceUdid && hasBootedSignal && webCodecsSupported
       ? buildIosSimulatorStreamUrl({
           udid: selectedDeviceUdid,
           cacheKey: `${selectedDeviceUdid}:${streamVersion}`,
@@ -251,6 +249,27 @@ const SimulatorPanel = memo(function SimulatorPanel({
     void invalidateSimulatorState();
   }, [invalidateSimulatorState, nowMs, selectedDeviceUdid, selectedRuntimeDevice, streamUrl]);
 
+  useEffect(() => {
+    const canvas = viewportRef.current;
+    if (!canvas || !streamUrl) {
+      return;
+    }
+    const player = startH264StreamPlayer({
+      canvas,
+      streamUrl,
+      onError: (error) => {
+        toastManager.add({
+          type: "error",
+          title: "Simulator stream failed",
+          description: error.message,
+        });
+        setStreamVersion((current) => current + 1);
+        void invalidateSimulatorState();
+      },
+    });
+    return () => player.stop();
+  }, [invalidateSimulatorState, streamUrl]);
+
   const bootMutation = useMutation({
     mutationFn: async (udid: string) =>
       ensureEnvironmentApi(environmentId).simulator.boot({ udid }),
@@ -273,8 +292,10 @@ const SimulatorPanel = memo(function SimulatorPanel({
       input:
         | { kind: "tap"; x: number; y: number }
         | { kind: "drag"; fromX: number; fromY: number; toX: number; toY: number }
+        | { kind: "pointer"; phase: "began" | "moved" | "ended"; x: number; y: number }
         | { kind: "type"; text: string }
         | { kind: "press"; key: string },
+      options?: { silent?: boolean },
     ) => {
       if (!selectedDeviceUdid) {
         return;
@@ -285,71 +306,104 @@ const SimulatorPanel = memo(function SimulatorPanel({
           udid: selectedDeviceUdid,
         });
       } catch (error) {
-        toastManager.add({
-          type: "error",
-          title: "Simulator input failed",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        });
+        if (!options?.silent) {
+          toastManager.add({
+            type: "error",
+            title: "Simulator input failed",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          });
+        }
         void invalidateSimulatorState();
       }
     },
     [environmentId, invalidateSimulatorState, selectedDeviceUdid],
   );
 
-  const handlePointerDown = useCallback((event: PointerEvent<HTMLImageElement>) => {
-    const target = event.currentTarget;
-    target.setPointerCapture(event.pointerId);
-    const { x, y } = normalizePointerPosition(target, event.clientX, event.clientY);
-    dragStateRef.current = {
-      startX: x,
-      startY: y,
-      latestX: x,
-      latestY: y,
-    };
-    target.focus();
-  }, []);
-
-  const handlePointerMove = useCallback((event: PointerEvent<HTMLImageElement>) => {
-    if (!dragStateRef.current) {
+  // Drains the gesture's latest position to the server while the pointer is
+  // down. We keep at most one pointer-move RPC in flight so a slow send
+  // coalesces every queued frame into the most recent coordinate.
+  const flushPointerMove = useCallback(() => {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.sendInFlight || gesture.ended || !gesture.pendingPosition) {
       return;
     }
-    const { x, y } = normalizePointerPosition(event.currentTarget, event.clientX, event.clientY);
-    dragStateRef.current = {
-      ...dragStateRef.current,
-      latestX: x,
-      latestY: y,
-    };
-  }, []);
+    const position = gesture.pendingPosition;
+    gesture.pendingPosition = null;
+    gesture.sendInFlight = true;
+    void sendInteraction(
+      { kind: "pointer", phase: "moved", x: position.x, y: position.y },
+      { silent: true },
+    ).finally(() => {
+      const current = gestureRef.current;
+      if (!current || current.pointerId !== gesture.pointerId) {
+        return;
+      }
+      current.sendInFlight = false;
+      if (current.pendingPosition && !current.ended) {
+        flushPointerMove();
+      }
+    });
+  }, [sendInteraction]);
 
-  const handlePointerUp = useCallback(
-    (event: PointerEvent<HTMLImageElement>) => {
-      const dragState = dragStateRef.current;
-      dragStateRef.current = null;
-      if (!dragState) {
+  const handlePointerDown = useCallback(
+    (event: PointerEvent<HTMLCanvasElement>) => {
+      const target = event.currentTarget;
+      target.setPointerCapture(event.pointerId);
+      const { x, y } = normalizePointerPosition(target, event.clientX, event.clientY);
+      gestureRef.current = {
+        pointerId: event.pointerId,
+        latestX: x,
+        latestY: y,
+        sendInFlight: false,
+        pendingPosition: null,
+        ended: false,
+      };
+      target.focus();
+      void sendInteraction({ kind: "pointer", phase: "began", x, y });
+    },
+    [sendInteraction],
+  );
+
+  const handlePointerMove = useCallback(
+    (event: PointerEvent<HTMLCanvasElement>) => {
+      const gesture = gestureRef.current;
+      if (!gesture || gesture.pointerId !== event.pointerId || gesture.ended) {
         return;
       }
-      event.currentTarget.releasePointerCapture(event.pointerId);
-      if (isDragGesture(dragState)) {
-        void sendInteraction({
-          kind: "drag",
-          fromX: dragState.startX,
-          fromY: dragState.startY,
-          toX: dragState.latestX,
-          toY: dragState.latestY,
-        });
+      const { x, y } = normalizePointerPosition(event.currentTarget, event.clientX, event.clientY);
+      gesture.latestX = x;
+      gesture.latestY = y;
+      gesture.pendingPosition = { x, y };
+      // `sendInFlight` already coalesces bursts of pointer events into a
+      // single outstanding RPC, so dispatch directly instead of waiting
+      // a frame boundary — that was adding up to ~16ms of idle latency
+      // per round trip on localhost.
+      flushPointerMove();
+    },
+    [flushPointerMove],
+  );
+
+  const endPointerGesture = useCallback(
+    (event: PointerEvent<HTMLCanvasElement>) => {
+      const gesture = gestureRef.current;
+      if (!gesture || gesture.pointerId !== event.pointerId || gesture.ended) {
         return;
       }
-      void sendInteraction({
-        kind: "tap",
-        x: dragState.latestX,
-        y: dragState.latestY,
-      });
+      gesture.ended = true;
+      const { x, y } = normalizePointerPosition(event.currentTarget, event.clientX, event.clientY);
+      gesture.latestX = x;
+      gesture.latestY = y;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      gestureRef.current = null;
+      void sendInteraction({ kind: "pointer", phase: "ended", x, y });
     },
     [sendInteraction],
   );
 
   const handleKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLImageElement>) => {
+    (event: KeyboardEvent<HTMLCanvasElement>) => {
       if (event.metaKey || event.ctrlKey || event.altKey) {
         return;
       }
@@ -550,22 +604,18 @@ const SimulatorPanel = memo(function SimulatorPanel({
                 </div>
               ) : null}
               {canRenderStream ? (
-                <img
+                <canvas
                   key={streamUrl}
                   ref={viewportRef}
-                  src={streamUrl ?? undefined}
-                  alt="Live iOS Simulator stream"
+                  aria-label="Live iOS Simulator stream"
+                  role="img"
                   className="max-h-full max-w-full select-none outline-none"
-                  draggable={false}
                   tabIndex={0}
                   onPointerDown={handlePointerDown}
                   onPointerMove={handlePointerMove}
-                  onPointerUp={handlePointerUp}
+                  onPointerUp={endPointerGesture}
+                  onPointerCancel={endPointerGesture}
                   onKeyDown={handleKeyDown}
-                  onError={() => {
-                    setStreamVersion((current) => current + 1);
-                    void invalidateSimulatorState();
-                  }}
                 />
               ) : (
                 <div className="flex max-w-sm flex-col items-center gap-3 px-6 text-center text-sm text-slate-300/75">

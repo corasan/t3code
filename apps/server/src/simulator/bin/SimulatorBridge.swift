@@ -1,8 +1,9 @@
 import CoreGraphics
-import CoreImage
+import CoreMedia
+import CoreVideo
 import Foundation
 import IOSurface
-import ImageIO
+import VideoToolbox
 
 enum BridgeError: Error {
     case usage(String)
@@ -20,6 +21,7 @@ enum BridgeError: Error {
 struct InteractiveRequest: Codable {
     let id: Int
     let kind: String
+    let phase: String?
     let x: Double?
     let y: Double?
     let fromX: Double?
@@ -49,48 +51,135 @@ final class InteractiveSession {
     }
 }
 
+/// Streams the booted simulator's IOSurface framebuffer as H.264 Annex-B
+/// access units over stdout. Each access unit is framed as
+/// `[4 bytes big-endian length][Annex-B NAL units…]` so the server can pass
+/// bytes through without re-parsing, and the browser can feed each length-
+/// delimited chunk directly into a WebCodecs `VideoDecoder`.
+///
+/// Hardware H.264 encoding via VideoToolbox is ~1–2 orders of magnitude
+/// cheaper (CPU and bandwidth) than the previous per-frame JPEG pipeline,
+/// which forced a GPU→CPU readback (`CIContext.createCGImage`) plus a
+/// software JPEG encode for every frame.
 final class DeviceStreamer {
     private let surface: IOSurfaceRef
-    private let fps: Int
-    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
-    private let encodingQueue = DispatchQueue(label: "t3code.simulator.encoding", qos: .userInteractive)
-    private let reusableData = NSMutableData(capacity: 256 * 1024) ?? NSMutableData()
-    private let jpegQuality: CGFloat = 0.4
+    private let targetFps: Int
+    private let pollFps: Int
+    private let captureQueue = DispatchQueue(label: "t3code.simulator.capture", qos: .userInteractive)
+    private let writeQueue = DispatchQueue(label: "t3code.simulator.write", qos: .userInteractive)
+
+    private var compressionSession: VTCompressionSession?
     private var timer: DispatchSourceTimer?
-    // Optional so the first tick is unconditional: an idle simulator (no
-    // animations, no clock change) keeps the IOSurface seed constant, and
-    // browsers won't render anything in an MJPEG <img> until at least one
-    // frame arrives — which used to require the user to interact before
-    // anything appeared on screen.
     private var lastSeed: UInt32?
-    private var isEncoding = false
+    private var frameIndex: Int64 = 0
+    private var scratchPacket = Data(capacity: 256 * 1024)
 
     init(surface: IOSurfaceRef, fps: Int) {
+        let clamped = max(1, min(fps, 120))
         self.surface = surface
-        self.fps = max(1, fps)
+        self.targetFps = clamped
+        // Poll at up to 2× the target FPS so any IOSurface seed change shows
+        // up within half a frame. The seed check is cheap — skipped ticks
+        // are ~free.
+        self.pollFps = min(120, clamped * 2)
     }
 
-    func start() {
-        // Push an immediate frame synchronously so the browser receives bytes
-        // (and therefore renders the <img>) the moment the connection is
-        // established, instead of waiting up to one timer interval — or
-        // indefinitely on a static screen.
-        encodingQueue.async { [weak self] in
-            self?.tickIfChanged(force: true)
+    func start() throws {
+        try createCompressionSession()
+
+        // Emit an initial keyframe synchronously so the browser has frames
+        // to decode before the simulator animates anything.
+        captureQueue.async { [weak self] in
+            self?.tick(force: true)
         }
 
-        let interval = 1.0 / Double(fps)
-        let timer = DispatchSource.makeTimerSource(queue: encodingQueue)
-        timer.schedule(deadline: .now() + interval, repeating: interval)
+        let interval = 1.0 / Double(pollFps)
+        let timer = DispatchSource.makeTimerSource(queue: captureQueue)
+        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(1))
         timer.setEventHandler { [weak self] in
-            self?.tickIfChanged(force: false)
+            self?.tick(force: false)
         }
         self.timer = timer
         timer.resume()
     }
 
-    private func tickIfChanged(force: Bool) {
-        if isEncoding {
+    // MARK: - VTCompressionSession
+
+    private func createCompressionSession() throws {
+        let width = Int32(IOSurfaceGetWidth(surface))
+        let height = Int32(IOSurfaceGetHeight(surface))
+        guard width > 0, height > 0 else {
+            throw BridgeError.deviceIONotReady("Simulator framebuffer has zero dimensions.")
+        }
+
+        var session: VTCompressionSession?
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        let status = VTCompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            width: width,
+            height: height,
+            codecType: kCMVideoCodecType_H264,
+            encoderSpecification: nil,
+            imageBufferAttributes: nil,
+            compressedDataAllocator: nil,
+            outputCallback: DeviceStreamer.encoderCallback,
+            refcon: refcon,
+            compressionSessionOut: &session
+        )
+        guard status == noErr, let session else {
+            throw BridgeError.sendFailed(
+                "Failed to create H.264 compression session (status \(status))."
+            )
+        }
+
+        // Low-latency realtime encode, constant frame rate target, reasonable
+        // bandwidth ceiling. No B-frames so each output frame is immediately
+        // decodable.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_ProfileLevel,
+            value: kVTProfileLevel_H264_Baseline_AutoLevel
+        )
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_ExpectedFrameRate,
+            value: targetFps as CFNumber
+        )
+        // ~6 Mbit/s is plenty for a phone-sized framebuffer at 60fps and
+        // gives headroom for scroll-heavy screens. The browser decodes
+        // entirely in hardware, so bandwidth — not quality — is the limit.
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_AverageBitRate,
+            value: NSNumber(value: 6_000_000)
+        )
+        // Cap burst bitrate so a sudden scene change doesn't blow the pipe.
+        let dataRateLimits: [NSNumber] = [NSNumber(value: 9_000_000 / 8), NSNumber(value: 1)]
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_DataRateLimits,
+            value: dataRateLimits as CFArray
+        )
+        // Keyframe every ~2 seconds, with a hard time bound so slow-moving
+        // scenes still recover from packet loss or late joiners.
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+            value: NSNumber(value: targetFps * 2)
+        )
+        VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+            value: NSNumber(value: 2.0)
+        )
+        VTCompressionSessionPrepareToEncodeFrames(session)
+        self.compressionSession = session
+    }
+
+    private func tick(force: Bool) {
+        guard let session = compressionSession else {
             return
         }
 
@@ -99,47 +188,172 @@ final class DeviceStreamer {
             return
         }
         lastSeed = currentSeed
-        isEncoding = true
-        defer { isEncoding = false }
 
-        guard let frame = encodeFrame() else {
+        var unmanagedPixelBuffer: Unmanaged<CVPixelBuffer>?
+        let status = CVPixelBufferCreateWithIOSurface(
+            kCFAllocatorDefault,
+            surface,
+            nil,
+            &unmanagedPixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer = unmanagedPixelBuffer?.takeRetainedValue()
+        else {
             return
         }
-        writeFrame(frame)
+
+        let pts = CMTime(value: frameIndex, timescale: Int32(targetFps))
+        frameIndex += 1
+
+        // Tell the encoder to emit a fresh keyframe for the forced first
+        // frame so the client can configure its decoder immediately.
+        var frameProperties: CFDictionary?
+        if force {
+            frameProperties = [
+                kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue
+            ] as CFDictionary
+        }
+
+        VTCompressionSessionEncodeFrame(
+            session,
+            imageBuffer: pixelBuffer,
+            presentationTimeStamp: pts,
+            duration: .invalid,
+            frameProperties: frameProperties,
+            sourceFrameRefcon: nil,
+            infoFlagsOut: nil
+        )
     }
 
-    private func encodeFrame() -> Data? {
-        let image = CIImage(ioSurface: surface)
-        guard let cgImage = ciContext.createCGImage(image, from: image.extent) else {
-            return nil
-        }
+    // MARK: - Annex-B output
 
-        reusableData.length = 0
-        guard let destination = CGImageDestinationCreateWithData(
-            reusableData as CFMutableData,
-            "public.jpeg" as CFString,
-            1,
-            nil
-        ) else {
-            return nil
+    private static let encoderCallback: VTCompressionOutputCallback = {
+        outputCallbackRefCon, _, status, _, sampleBuffer in
+        guard status == noErr, let sampleBuffer, let outputCallbackRefCon else {
+            return
         }
-
-        let options: [CFString: Any] = [
-            kCGImageDestinationLossyCompressionQuality: NSNumber(value: Float(jpegQuality))
-        ]
-        CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else {
-            return nil
-        }
-
-        return Data(reusableData)
+        let streamer = Unmanaged<DeviceStreamer>.fromOpaque(outputCallbackRefCon).takeUnretainedValue()
+        streamer.handleEncoded(sampleBuffer: sampleBuffer)
     }
 
-    private func writeFrame(_ data: Data) {
-        var length = UInt32(data.count).bigEndian
-        let header = withUnsafeBytes(of: &length) { Data($0) }
-        FileHandle.standardOutput.write(header)
-        FileHandle.standardOutput.write(data)
+    private func handleEncoded(sampleBuffer: CMSampleBuffer) {
+        guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            return
+        }
+
+        let isKeyframe = Self.isKeyframe(sampleBuffer)
+        scratchPacket.removeAll(keepingCapacity: true)
+
+        // Prepend SPS + PPS (Annex-B) on every keyframe so a mid-stream
+        // subscriber can start decoding from any keyframe without needing
+        // an out-of-band codec config.
+        if isKeyframe,
+            let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer)
+        {
+            appendParameterSets(from: formatDescription, into: &scratchPacket)
+        }
+
+        var totalLength = 0
+        var rawPointer: UnsafeMutablePointer<Int8>?
+        let getStatus = CMBlockBufferGetDataPointer(
+            dataBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: nil,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &rawPointer
+        )
+        guard getStatus == kCMBlockBufferNoErr, let rawPointer else {
+            return
+        }
+
+        // AVCC → Annex-B conversion. AVCC uses [u32 length][NALU…] per unit;
+        // Annex-B uses a 4-byte start code 0x00000001.
+        let basePointer = UnsafeRawPointer(rawPointer)
+        var offset = 0
+        while offset + 4 <= totalLength {
+            let lengthBytes = basePointer.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
+            let nalLength = Int(UInt32(bigEndian: lengthBytes))
+            offset += 4
+            if nalLength <= 0 || offset + nalLength > totalLength {
+                return
+            }
+            scratchPacket.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+            scratchPacket.append(
+                UnsafeBufferPointer<UInt8>(
+                    start: basePointer.advanced(by: offset).assumingMemoryBound(to: UInt8.self),
+                    count: nalLength
+                )
+            )
+            offset += nalLength
+        }
+
+        writePacket(scratchPacket)
+    }
+
+    private func appendParameterSets(
+        from formatDescription: CMFormatDescription,
+        into packet: inout Data
+    ) {
+        var count = 0
+        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            formatDescription,
+            parameterSetIndex: 0,
+            parameterSetPointerOut: nil,
+            parameterSetSizeOut: nil,
+            parameterSetCountOut: &count,
+            nalUnitHeaderLengthOut: nil
+        )
+        for index in 0..<count {
+            var parameterSetPointer: UnsafePointer<UInt8>?
+            var parameterSetSize = 0
+            let status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                formatDescription,
+                parameterSetIndex: index,
+                parameterSetPointerOut: &parameterSetPointer,
+                parameterSetSizeOut: &parameterSetSize,
+                parameterSetCountOut: nil,
+                nalUnitHeaderLengthOut: nil
+            )
+            guard status == noErr, let parameterSetPointer, parameterSetSize > 0 else {
+                continue
+            }
+            packet.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+            packet.append(UnsafeBufferPointer(start: parameterSetPointer, count: parameterSetSize))
+        }
+    }
+
+    private static func isKeyframe(_ sampleBuffer: CMSampleBuffer) -> Bool {
+        guard
+            let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(
+                sampleBuffer,
+                createIfNecessary: false
+            ),
+            CFArrayGetCount(attachmentsArray) > 0
+        else {
+            return true
+        }
+        let dict = unsafeBitCast(
+            CFArrayGetValueAtIndex(attachmentsArray, 0),
+            to: CFDictionary.self
+        )
+        let notSync = CFDictionaryGetValue(
+            dict,
+            Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque()
+        )
+        // Missing key or false → sync (keyframe).
+        return notSync == nil || CFBooleanGetValue(unsafeBitCast(notSync, to: CFBoolean.self)) == false
+    }
+
+    private func writePacket(_ packet: Data) {
+        if packet.isEmpty {
+            return
+        }
+        let packetCopy = Data(packet)
+        writeQueue.async {
+            var length = UInt32(packetCopy.count).bigEndian
+            let header = withUnsafeBytes(of: &length) { Data($0) }
+            FileHandle.standardOutput.write(header)
+            FileHandle.standardOutput.write(packetCopy)
+        }
     }
 }
 
@@ -189,7 +403,7 @@ final class SimulatorBridge {
     func streamDevice(_ udid: String, fps: Int) throws {
         let session = try createInteractiveSession(udid: udid)
         let streamer = DeviceStreamer(surface: session.surface, fps: fps)
-        streamer.start()
+        try streamer.start()
         RunLoop.main.run()
     }
 
@@ -296,6 +510,13 @@ final class SimulatorBridge {
                 throw BridgeError.invalidRequest("drag requires fromX, fromY, toX, and toY")
             }
             try drag(session: session, fromX: fromX, fromY: fromY, toX: toX, toY: toY)
+        case "pointer":
+            guard let x = request.x, let y = request.y, let phase = request.phase else {
+                throw BridgeError.invalidRequest("pointer requires x, y, and phase")
+            }
+            // Only wait for HID ack on gesture boundaries. Intermediate moves
+            // are fired async so the serve loop can drain stdin at native rate.
+            try sendTouch(session: session, x: x, y: y, phase: phase, awaitCompletion: phase != "moved")
         case "type":
             guard let text = request.text else {
                 throw BridgeError.invalidRequest("type requires text")
@@ -436,7 +657,7 @@ final class SimulatorBridge {
         return client
     }
 
-    private func sendTouch(session: InteractiveSession, x: Double, y: Double, phase: String) throws {
+    private func sendTouch(session: InteractiveSession, x: Double, y: Double, phase: String, awaitCompletion: Bool = true) throws {
         guard let mouseFn else {
             throw BridgeError.hidUnavailable("Indigo touch injection is unavailable.")
         }
@@ -457,7 +678,7 @@ final class SimulatorBridge {
         guard let message = mouseFn(&point, nil, 0x32, eventType, size, 0) else {
             throw BridgeError.sendFailed("Failed to build a touch message for the simulator.")
         }
-        try sendIndigoMessage(client: session.hidClient, message: message)
+        try sendIndigoMessage(client: session.hidClient, message: message, awaitCompletion: awaitCompletion)
     }
 
     private func sendKey(udid: String, key: String, isDown: Bool) throws {
@@ -477,15 +698,11 @@ final class SimulatorBridge {
         try sendIndigoMessage(client: session.hidClient, message: message)
     }
 
-    private func sendIndigoMessage(client: AnyObject, message: UnsafeMutableRawPointer) throws {
+    private func sendIndigoMessage(client: AnyObject, message: UnsafeMutableRawPointer, awaitCompletion: Bool = true) throws {
         let sendSelector = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
         guard client.responds(to: sendSelector) else {
             throw BridgeError.hidUnavailable("HID client cannot send Indigo messages on this Xcode version.")
         }
-
-        let group = DispatchGroup()
-        var completionError: NSError?
-        group.enter()
 
         typealias SendFn = @convention(c) (
             AnyObject,
@@ -497,6 +714,21 @@ final class SimulatorBridge {
         ) -> Void
         let method = client.method(for: sendSelector)
         let sendFn = unsafeBitCast(method, to: SendFn.self)
+
+        // Fire-and-forget path for streaming pointer-moved samples. Awaiting
+        // the HID ack on every sample caps the serve loop at the HID-ack rate,
+        // which starves iOS of touch samples during a drag — iOS then reads
+        // the sparse samples as high finger velocity and applies a long fling
+        // momentum after the user has already released.
+        if !awaitCompletion {
+            let callback: @convention(block) (NSError?) -> Void = { _ in }
+            sendFn(client, sendSelector, message, true, hidCompletionQueue, callback as Any)
+            return
+        }
+
+        let group = DispatchGroup()
+        var completionError: NSError?
+        group.enter()
         let callback: @convention(block) (NSError?) -> Void = { error in
             completionError = error
             group.leave()

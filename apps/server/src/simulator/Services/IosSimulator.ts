@@ -21,7 +21,7 @@ export interface IosSimulatorShape {
   readonly interact: (
     input: IosSimulatorInteractInput,
   ) => Effect.Effect<IosSimulatorInteractResult, SimulatorError>;
-  readonly createMjpegStream: (input: {
+  readonly createVideoStream: (input: {
     readonly udid: string;
     readonly intervalMs?: number;
     readonly signal?: AbortSignal;
