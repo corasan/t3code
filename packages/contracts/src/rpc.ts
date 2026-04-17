@@ -76,6 +76,15 @@ import {
   ServerUpsertKeybindingResult,
 } from "./server.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
+import {
+  IosSimulatorBootInput,
+  IosSimulatorBootResult,
+  IosSimulatorInteractInput,
+  IosSimulatorInteractResult,
+  IosSimulatorProjectState,
+  IosSimulatorProjectStateInput,
+  SimulatorError,
+} from "./simulator.ts";
 
 export const WS_METHODS = {
   // Project registry methods
@@ -119,6 +128,11 @@ export const WS_METHODS = {
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
 
+  // Simulator methods
+  simulatorGetState: "simulator.getState",
+  simulatorBoot: "simulator.boot",
+  simulatorInteract: "simulator.interact",
+
   // Streaming subscriptions
   subscribeGitStatus: "subscribeGitStatus",
   subscribeTerminalEvents: "subscribeTerminalEvents",
@@ -154,6 +168,24 @@ export const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSetting
   payload: Schema.Struct({ patch: ServerSettingsPatch }),
   success: ServerSettings,
   error: ServerSettingsError,
+});
+
+export const WsSimulatorGetStateRpc = Rpc.make(WS_METHODS.simulatorGetState, {
+  payload: IosSimulatorProjectStateInput,
+  success: IosSimulatorProjectState,
+  error: SimulatorError,
+});
+
+export const WsSimulatorBootRpc = Rpc.make(WS_METHODS.simulatorBoot, {
+  payload: IosSimulatorBootInput,
+  success: IosSimulatorBootResult,
+  error: SimulatorError,
+});
+
+export const WsSimulatorInteractRpc = Rpc.make(WS_METHODS.simulatorInteract, {
+  payload: IosSimulatorInteractInput,
+  success: IosSimulatorInteractResult,
+  error: SimulatorError,
 });
 
 export const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
@@ -361,6 +393,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpsertKeybindingRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
+  WsSimulatorGetStateRpc,
+  WsSimulatorBootRpc,
+  WsSimulatorInteractRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
   WsShellOpenInEditorRpc,

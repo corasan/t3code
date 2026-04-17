@@ -4,6 +4,12 @@ import {
   type GitRunStackedActionResult,
   type GitStatusResult,
   type GitStatusStreamEvent,
+  type IosSimulatorBootInput,
+  type IosSimulatorBootResult,
+  type IosSimulatorInteractInput,
+  type IosSimulatorInteractResult,
+  type IosSimulatorProjectState,
+  type IosSimulatorProjectStateInput,
   type LocalApi,
   ORCHESTRATION_WS_METHODS,
   type ServerSettingsPatch,
@@ -76,6 +82,11 @@ export interface WsRpcClient {
       readonly cwd: Parameters<LocalApi["shell"]["openInEditor"]>[0];
       readonly editor: Parameters<LocalApi["shell"]["openInEditor"]>[1];
     }) => ReturnType<LocalApi["shell"]["openInEditor"]>;
+  };
+  readonly simulator: {
+    readonly getState: (input: IosSimulatorProjectStateInput) => Promise<IosSimulatorProjectState>;
+    readonly boot: (input: IosSimulatorBootInput) => Promise<IosSimulatorBootResult>;
+    readonly interact: (input: IosSimulatorInteractInput) => Promise<IosSimulatorInteractResult>;
   };
   readonly git: {
     readonly pull: RpcUnaryMethod<typeof WS_METHODS.gitPull>;
@@ -154,6 +165,13 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
     shell: {
       openInEditor: (input) =>
         transport.request((client) => client[WS_METHODS.shellOpenInEditor](input)),
+    },
+    simulator: {
+      getState: (input) =>
+        transport.request((client) => client[WS_METHODS.simulatorGetState](input)),
+      boot: (input) => transport.request((client) => client[WS_METHODS.simulatorBoot](input)),
+      interact: (input) =>
+        transport.request((client) => client[WS_METHODS.simulatorInteract](input)),
     },
     git: {
       pull: (input) => transport.request((client) => client[WS_METHODS.gitPull](input)),

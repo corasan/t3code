@@ -40,6 +40,14 @@ import type {
   TerminalSessionSnapshot,
   TerminalWriteInput,
 } from "./terminal.ts";
+import type {
+  IosSimulatorBootInput,
+  IosSimulatorBootResult,
+  IosSimulatorInteractInput,
+  IosSimulatorInteractResult,
+  IosSimulatorProjectState,
+  IosSimulatorProjectStateInput,
+} from "./simulator.ts";
 import type { ServerUpsertKeybindingInput } from "./server.ts";
 import type {
   ClientOrchestrationCommand,
@@ -288,5 +296,10 @@ export interface EnvironmentApi {
         onResubscribe?: () => void;
       },
     ) => () => void;
+  };
+  simulator: {
+    getState: (input: IosSimulatorProjectStateInput) => Promise<IosSimulatorProjectState>;
+    boot: (input: IosSimulatorBootInput) => Promise<IosSimulatorBootResult>;
+    interact: (input: IosSimulatorInteractInput) => Promise<IosSimulatorInteractResult>;
   };
 }

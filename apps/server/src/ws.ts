@@ -52,6 +52,7 @@ import { WorkspaceFileSystem } from "./workspace/Services/WorkspaceFileSystem.ts
 import { WorkspacePathOutsideRootError } from "./workspace/Services/WorkspacePaths.ts";
 import { ProjectSetupScriptRunner } from "./project/Services/ProjectSetupScriptRunner.ts";
 import { RepositoryIdentityResolver } from "./project/Services/RepositoryIdentityResolver.ts";
+import { IosSimulator } from "./simulator/Services/IosSimulator.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import {
@@ -149,6 +150,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
       const workspaceFileSystem = yield* WorkspaceFileSystem;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
       const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
+      const iosSimulator = yield* IosSimulator;
       const serverEnvironment = yield* ServerEnvironment;
       const serverAuth = yield* ServerAuth;
       const bootstrapCredentials = yield* BootstrapCredentialService;
@@ -771,6 +773,18 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
         [WS_METHODS.serverUpdateSettings]: ({ patch }) =>
           observeRpcEffect(WS_METHODS.serverUpdateSettings, serverSettings.updateSettings(patch), {
             "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.simulatorGetState]: (input) =>
+          observeRpcEffect(WS_METHODS.simulatorGetState, iosSimulator.getProjectState(input), {
+            "rpc.aggregate": "simulator",
+          }),
+        [WS_METHODS.simulatorBoot]: (input) =>
+          observeRpcEffect(WS_METHODS.simulatorBoot, iosSimulator.boot(input), {
+            "rpc.aggregate": "simulator",
+          }),
+        [WS_METHODS.simulatorInteract]: (input) =>
+          observeRpcEffect(WS_METHODS.simulatorInteract, iosSimulator.interact(input), {
+            "rpc.aggregate": "simulator",
           }),
         [WS_METHODS.projectsSearchEntries]: (input) =>
           observeRpcEffect(

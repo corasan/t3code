@@ -1,5 +1,15 @@
 import { createFileRoute, retainSearchParams, useNavigate } from "@tanstack/react-router";
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
+import { scopeProjectRef } from "@t3tools/client-runtime";
 
 import ChatView from "../components/ChatView";
 import { threadHasStarted } from "../components/ChatView.logic";
@@ -15,19 +25,25 @@ import {
   type DiffRouteSearch,
   parseDiffRouteSearch,
   stripDiffSearchParams,
+  stripRightPanelSearchParams,
+  stripSimulatorSearchParams,
 } from "../diffRouteSearch";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import { selectEnvironmentState, selectThreadExistsByRef, useStore } from "../store";
-import { createThreadSelectorByRef } from "../storeSelectors";
+import { createProjectSelectorByRef, createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteRef, buildThreadRouteParams } from "../threadRoutes";
 import { RightPanelSheet } from "../components/RightPanelSheet";
+import SimulatorPanel from "../components/SimulatorPanel";
 import { Sidebar, SidebarInset, SidebarProvider, SidebarRail } from "~/components/ui/sidebar";
 
 const DiffPanel = lazy(() => import("../components/DiffPanel"));
 const DIFF_INLINE_SIDEBAR_WIDTH_STORAGE_KEY = "chat_diff_sidebar_width";
 const DIFF_INLINE_DEFAULT_WIDTH = "clamp(28rem,48vw,44rem)";
 const DIFF_INLINE_SIDEBAR_MIN_WIDTH = 26 * 16;
+const SIMULATOR_INLINE_SIDEBAR_WIDTH_STORAGE_KEY = "chat_simulator_sidebar_width";
+const SIMULATOR_INLINE_DEFAULT_WIDTH = "clamp(24rem,34vw,30rem)";
+const SIMULATOR_INLINE_SIDEBAR_MIN_WIDTH = 22 * 16;
 const COMPOSER_COMPACT_MIN_LEFT_CONTROLS_WIDTH_PX = 208;
 
 const DiffLoadingFallback = (props: { mode: DiffPanelMode }) => {
@@ -48,22 +64,22 @@ const LazyDiffPanel = (props: { mode: DiffPanelMode }) => {
   );
 };
 
-const DiffPanelInlineSidebar = (props: {
-  diffOpen: boolean;
-  onCloseDiff: () => void;
-  onOpenDiff: () => void;
-  renderDiffContent: boolean;
+const RightPanelInlineSidebar = (props: {
+  open: boolean;
+  defaultWidth: string;
+  storageKey: string;
+  minWidth: number;
+  onClose: () => void;
+  children: ReactNode;
 }) => {
-  const { diffOpen, onCloseDiff, onOpenDiff, renderDiffContent } = props;
+  const { open, onClose, defaultWidth, storageKey, minWidth, children } = props;
   const onOpenChange = useCallback(
     (open: boolean) => {
-      if (open) {
-        onOpenDiff();
-        return;
+      if (!open) {
+        onClose();
       }
-      onCloseDiff();
     },
-    [onCloseDiff, onOpenDiff],
+    [onClose],
   );
   const shouldAcceptInlineSidebarWidth = useCallback(
     ({ nextWidth, wrapper }: { nextWidth: number; wrapper: HTMLElement }) => {
@@ -114,22 +130,22 @@ const DiffPanelInlineSidebar = (props: {
   return (
     <SidebarProvider
       defaultOpen={false}
-      open={diffOpen}
+      open={open}
       onOpenChange={onOpenChange}
       className="w-auto min-h-0 flex-none bg-transparent"
-      style={{ "--sidebar-width": DIFF_INLINE_DEFAULT_WIDTH } as React.CSSProperties}
+      style={{ "--sidebar-width": defaultWidth } as CSSProperties}
     >
       <Sidebar
         side="right"
         collapsible="offcanvas"
         className="border-l border-border bg-card text-foreground"
         resizable={{
-          minWidth: DIFF_INLINE_SIDEBAR_MIN_WIDTH,
+          minWidth,
           shouldAcceptWidth: shouldAcceptInlineSidebarWidth,
-          storageKey: DIFF_INLINE_SIDEBAR_WIDTH_STORAGE_KEY,
+          storageKey,
         }}
       >
-        {renderDiffContent ? <LazyDiffPanel mode="sidebar" /> : null}
+        {children}
         <SidebarRail />
       </Sidebar>
     </SidebarProvider>
@@ -146,6 +162,13 @@ function ChatThreadRouteView() {
     (store) => selectEnvironmentState(store, threadRef?.environmentId ?? null).bootstrapComplete,
   );
   const serverThread = useStore(useMemo(() => createThreadSelectorByRef(threadRef), [threadRef]));
+  const activeProjectRef =
+    threadRef && serverThread
+      ? scopeProjectRef(threadRef.environmentId, serverThread.projectId)
+      : null;
+  const activeProject = useStore(
+    useMemo(() => createProjectSelectorByRef(activeProjectRef), [activeProjectRef]),
+  );
   const threadExists = useStore((store) => selectThreadExistsByRef(store, threadRef));
   const environmentHasServerThreads = useStore(
     (store) => selectEnvironmentState(store, threadRef?.environmentId ?? null).threadIds.length > 0,
@@ -166,6 +189,8 @@ function ChatThreadRouteView() {
   const serverThreadStarted = threadHasStarted(serverThread);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
   const diffOpen = search.diff === "1";
+  const simulatorOpen = search.simulator === "1";
+  const activeRightPanel = diffOpen ? "diff" : simulatorOpen ? "simulator" : null;
   const shouldUseDiffSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
   const currentThreadKey = threadRef ? `${threadRef.environmentId}:${threadRef.threadId}` : null;
   const [diffPanelMountState, setDiffPanelMountState] = useState(() => ({
@@ -194,7 +219,17 @@ function ChatThreadRouteView() {
     void navigate({
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(threadRef),
-      search: { diff: undefined },
+      search: (previous) => stripDiffSearchParams(previous),
+    });
+  }, [navigate, threadRef]);
+  const closeSimulator = useCallback(() => {
+    if (!threadRef) {
+      return;
+    }
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: buildThreadRouteParams(threadRef),
+      search: (previous) => stripSimulatorSearchParams(previous),
     });
   }, [navigate, threadRef]);
   const openDiff = useCallback(() => {
@@ -206,11 +241,36 @@ function ChatThreadRouteView() {
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(threadRef),
       search: (previous) => {
-        const rest = stripDiffSearchParams(previous);
+        const rest = stripRightPanelSearchParams(previous);
         return { ...rest, diff: "1" };
       },
     });
   }, [markDiffOpened, navigate, threadRef]);
+  const toggleSimulator = useCallback(() => {
+    if (!threadRef) {
+      return;
+    }
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: buildThreadRouteParams(threadRef),
+      search: (previous) => {
+        if (previous.simulator === "1") {
+          return stripSimulatorSearchParams(previous);
+        }
+        const rest = stripRightPanelSearchParams(previous);
+        return { ...rest, simulator: "1" };
+      },
+    });
+  }, [navigate, threadRef]);
+  const closeRightPanel = useCallback(() => {
+    if (activeRightPanel === "diff") {
+      closeDiff();
+      return;
+    }
+    if (activeRightPanel === "simulator") {
+      closeSimulator();
+    }
+  }, [activeRightPanel, closeDiff, closeSimulator]);
 
   useEffect(() => {
     if (!threadRef || !bootstrapComplete) {
@@ -243,16 +303,39 @@ function ChatThreadRouteView() {
             environmentId={threadRef.environmentId}
             threadId={threadRef.threadId}
             onDiffPanelOpen={markDiffOpened}
-            reserveTitleBarControlInset={!diffOpen}
+            simulatorOpen={simulatorOpen}
+            onToggleSimulator={toggleSimulator}
+            reserveTitleBarControlInset={activeRightPanel === null}
             routeKind="server"
           />
         </SidebarInset>
-        <DiffPanelInlineSidebar
-          diffOpen={diffOpen}
-          onCloseDiff={closeDiff}
-          onOpenDiff={openDiff}
-          renderDiffContent={shouldRenderDiffContent}
-        />
+        {activeRightPanel === "diff" ? (
+          <RightPanelInlineSidebar
+            open
+            onClose={closeDiff}
+            defaultWidth={DIFF_INLINE_DEFAULT_WIDTH}
+            storageKey={DIFF_INLINE_SIDEBAR_WIDTH_STORAGE_KEY}
+            minWidth={DIFF_INLINE_SIDEBAR_MIN_WIDTH}
+          >
+            {shouldRenderDiffContent ? <LazyDiffPanel mode="sidebar" /> : null}
+          </RightPanelInlineSidebar>
+        ) : null}
+        {activeRightPanel === "simulator" ? (
+          <RightPanelInlineSidebar
+            open
+            onClose={closeSimulator}
+            defaultWidth={SIMULATOR_INLINE_DEFAULT_WIDTH}
+            storageKey={SIMULATOR_INLINE_SIDEBAR_WIDTH_STORAGE_KEY}
+            minWidth={SIMULATOR_INLINE_SIDEBAR_MIN_WIDTH}
+          >
+            <SimulatorPanel
+              environmentId={threadRef.environmentId}
+              projectCwd={activeProject?.cwd ?? null}
+              mode="sidebar"
+              onClose={closeSimulator}
+            />
+          </RightPanelInlineSidebar>
+        ) : null}
       </>
     );
   }
@@ -264,11 +347,22 @@ function ChatThreadRouteView() {
           environmentId={threadRef.environmentId}
           threadId={threadRef.threadId}
           onDiffPanelOpen={markDiffOpened}
+          simulatorOpen={simulatorOpen}
+          onToggleSimulator={toggleSimulator}
           routeKind="server"
         />
       </SidebarInset>
-      <RightPanelSheet open={diffOpen} onClose={closeDiff}>
-        {shouldRenderDiffContent ? <LazyDiffPanel mode="sheet" /> : null}
+      <RightPanelSheet open={activeRightPanel !== null} onClose={closeRightPanel}>
+        {activeRightPanel === "diff" && shouldRenderDiffContent ? (
+          <LazyDiffPanel mode="sheet" />
+        ) : activeRightPanel === "simulator" ? (
+          <SimulatorPanel
+            environmentId={threadRef.environmentId}
+            projectCwd={activeProject?.cwd ?? null}
+            mode="sheet"
+            onClose={closeSimulator}
+          />
+        ) : null}
       </RightPanelSheet>
     </>
   );
@@ -277,7 +371,7 @@ function ChatThreadRouteView() {
 export const Route = createFileRoute("/_chat/$environmentId/$threadId")({
   validateSearch: (search) => parseDiffRouteSearch(search),
   search: {
-    middlewares: [retainSearchParams<DiffRouteSearch>(["diff"])],
+    middlewares: [retainSearchParams<DiffRouteSearch>(["diff", "simulator"])],
   },
   component: ChatThreadRouteView,
 });

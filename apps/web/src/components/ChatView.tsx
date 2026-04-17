@@ -29,6 +29,7 @@ import { applyClaudePromptEffortPrefix } from "@t3tools/shared/model";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { truncate } from "@t3tools/shared/String";
 import { Debouncer } from "@tanstack/react-pacer";
+import { useQuery } from "@tanstack/react-query";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
@@ -166,6 +167,7 @@ import {
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
+import { iosSimulatorStateQueryOptions } from "~/lib/simulatorReactQuery";
 import {
   useServerAvailableEditors,
   useServerConfig,
@@ -318,6 +320,8 @@ type ChatViewProps =
       environmentId: EnvironmentId;
       threadId: ThreadId;
       onDiffPanelOpen?: () => void;
+      simulatorOpen?: boolean;
+      onToggleSimulator?: () => void;
       reserveTitleBarControlInset?: boolean;
       routeKind: "server";
       draftId?: never;
@@ -326,6 +330,8 @@ type ChatViewProps =
       environmentId: EnvironmentId;
       threadId: ThreadId;
       onDiffPanelOpen?: () => void;
+      simulatorOpen?: boolean;
+      onToggleSimulator?: () => void;
       reserveTitleBarControlInset?: boolean;
       routeKind: "draft";
       draftId: DraftId;
@@ -585,6 +591,8 @@ export default function ChatView(props: ChatViewProps) {
     threadId,
     routeKind,
     onDiffPanelOpen,
+    simulatorOpen = false,
+    onToggleSimulator,
     reserveTitleBarControlInset = true,
   } = props;
   const draftId = routeKind === "draft" ? props.draftId : null;
@@ -1042,6 +1050,23 @@ export default function ChatView(props: ChatViewProps) {
     primaryEnvironmentId && activeThread?.environmentId === primaryEnvironmentId
       ? primaryServerConfig
       : (activeEnvRuntimeState?.serverConfig ?? primaryServerConfig);
+  const isPrimaryEnvironmentThread = Boolean(
+    primaryEnvironmentId && activeThread?.environmentId === primaryEnvironmentId,
+  );
+  const iosSimulatorStateQuery = useQuery(
+    iosSimulatorStateQueryOptions({
+      environmentId: routeKind === "server" && isPrimaryEnvironmentThread ? environmentId : null,
+      cwd: routeKind === "server" ? (activeProject?.cwd ?? null) : null,
+      enabled: Boolean(routeKind === "server" && isPrimaryEnvironmentThread && activeProject?.cwd),
+    }),
+  );
+  const simulatorAvailable = Boolean(
+    routeKind === "server" &&
+    isPrimaryEnvironmentThread &&
+    iosSimulatorStateQuery.data?.supported &&
+    iosSimulatorStateQuery.data.isExpoProject &&
+    iosSimulatorStateQuery.data.devices.length > 0,
+  );
   const providerStatuses = serverConfig?.providers ?? EMPTY_PROVIDERS;
   const unlockedSelectedProvider = resolveSelectableProvider(
     providerStatuses,
@@ -3236,12 +3261,15 @@ export default function ChatView(props: ChatViewProps) {
           diffToggleShortcutLabel={diffPanelShortcutLabel}
           gitCwd={gitCwd}
           diffOpen={diffOpen}
+          simulatorAvailable={simulatorAvailable}
+          simulatorOpen={simulatorOpen}
           onRunProjectScript={runProjectScript}
           onAddProjectScript={saveProjectScript}
           onUpdateProjectScript={updateProjectScript}
           onDeleteProjectScript={deleteProjectScript}
           onToggleTerminal={toggleTerminalVisibility}
           onToggleDiff={onToggleDiff}
+          onToggleSimulator={() => onToggleSimulator?.()}
         />
       </header>
 

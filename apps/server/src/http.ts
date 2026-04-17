@@ -21,6 +21,8 @@ import { resolveStaticDir, ServerConfig } from "./config.ts";
 import { decodeOtlpTraceRecords } from "./observability/TraceRecord.ts";
 import { BrowserTraceCollector } from "./observability/Services/BrowserTraceCollector.ts";
 import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolver.ts";
+import { IOS_SIMULATOR_MJPEG_BOUNDARY } from "./simulator/Layers/IosSimulator.ts";
+import { IosSimulator } from "./simulator/Services/IosSimulator.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { respondToAuthError } from "./auth/http.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
@@ -217,6 +219,45 @@ export const projectFaviconRouteLayer = HttpRouter.add(
         Effect.succeed(HttpServerResponse.text("Internal Server Error", { status: 500 })),
       ),
     );
+  }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
+);
+
+export const iosSimulatorStreamRouteLayer = HttpRouter.add(
+  "GET",
+  "/api/simulator/ios/stream",
+  Effect.gen(function* () {
+    yield* requireAuthenticatedRequest;
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const url = HttpServerRequest.toURL(request);
+    if (Option.isNone(url)) {
+      return HttpServerResponse.text("Bad Request", { status: 400 });
+    }
+
+    const udid = url.value.searchParams.get("udid")?.trim();
+    if (!udid) {
+      return HttpServerResponse.text("Missing udid parameter", { status: 400 });
+    }
+
+    const iosSimulator = yield* IosSimulator;
+    const responseOrStream = yield* iosSimulator.createMjpegStream({ udid }).pipe(
+      Effect.match({
+        onFailure: (error) => HttpServerResponse.text(error.message, { status: 409 }),
+        onSuccess: (stream) =>
+          HttpServerResponse.fromWeb(
+            new Response(stream, {
+              status: 200,
+              headers: {
+                "Cache-Control": "no-store, no-transform",
+                Connection: "keep-alive",
+                "Content-Type": `multipart/x-mixed-replace; boundary=${IOS_SIMULATOR_MJPEG_BOUNDARY}`,
+                "X-Accel-Buffering": "no",
+              },
+            }),
+          ),
+      }),
+    );
+
+    return responseOrStream;
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
 );
 
