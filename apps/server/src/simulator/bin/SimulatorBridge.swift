@@ -57,7 +57,12 @@ final class DeviceStreamer {
     private let reusableData = NSMutableData(capacity: 256 * 1024) ?? NSMutableData()
     private let jpegQuality: CGFloat = 0.4
     private var timer: DispatchSourceTimer?
-    private var lastSeed: UInt32 = 0
+    // Optional so the first tick is unconditional: an idle simulator (no
+    // animations, no clock change) keeps the IOSurface seed constant, and
+    // browsers won't render anything in an MJPEG <img> until at least one
+    // frame arrives — which used to require the user to interact before
+    // anything appeared on screen.
+    private var lastSeed: UInt32?
     private var isEncoding = false
 
     init(surface: IOSurfaceRef, fps: Int) {
@@ -66,30 +71,41 @@ final class DeviceStreamer {
     }
 
     func start() {
+        // Push an immediate frame synchronously so the browser receives bytes
+        // (and therefore renders the <img>) the moment the connection is
+        // established, instead of waiting up to one timer interval — or
+        // indefinitely on a static screen.
+        encodingQueue.async { [weak self] in
+            self?.tickIfChanged(force: true)
+        }
+
         let interval = 1.0 / Double(fps)
         let timer = DispatchSource.makeTimerSource(queue: encodingQueue)
-        timer.schedule(deadline: .now(), repeating: interval)
+        timer.schedule(deadline: .now() + interval, repeating: interval)
         timer.setEventHandler { [weak self] in
-            guard let self = self else { return }
-            if self.isEncoding {
-                return
-            }
-
-            let currentSeed = IOSurfaceGetSeed(self.surface)
-            guard currentSeed != self.lastSeed else {
-                return
-            }
-            self.lastSeed = currentSeed
-            self.isEncoding = true
-            defer { self.isEncoding = false }
-
-            guard let frame = self.encodeFrame() else {
-                return
-            }
-            self.writeFrame(frame)
+            self?.tickIfChanged(force: false)
         }
         self.timer = timer
         timer.resume()
+    }
+
+    private func tickIfChanged(force: Bool) {
+        if isEncoding {
+            return
+        }
+
+        let currentSeed = IOSurfaceGetSeed(surface)
+        if !force && currentSeed == lastSeed {
+            return
+        }
+        lastSeed = currentSeed
+        isEncoding = true
+        defer { isEncoding = false }
+
+        guard let frame = encodeFrame() else {
+            return
+        }
+        writeFrame(frame)
     }
 
     private func encodeFrame() -> Data? {

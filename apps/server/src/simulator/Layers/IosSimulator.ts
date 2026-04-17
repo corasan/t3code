@@ -32,7 +32,7 @@ const IOS_RUNTIME_RE = /\bios\b/i;
 const SIMULATOR_BRIDGE_SOURCE_PATH = fileURLToPath(
   new URL("../bin/SimulatorBridge.swift", import.meta.url),
 );
-const SIMULATOR_BRIDGE_BINARY_NAME = "t3code-simulator-device-bridge-v3";
+const SIMULATOR_BRIDGE_BINARY_NAME = "t3code-simulator-device-bridge-v4";
 
 interface SimctlListDevicesResponse {
   readonly devices?: Record<string, ReadonlyArray<SimctlDeviceJson>>;
@@ -557,27 +557,24 @@ const interact: IosSimulatorShape["interact"] = (input) =>
         throw createSimulatorError(supportReason ?? "iOS Simulator support is unavailable.");
       }
 
-      const device = await resolveDeviceByUdid(input.udid);
-      if (device.state !== "booted") {
-        throw createSimulatorError(
-          "The selected iOS Simulator device must be booted before it can receive input.",
-        );
-      }
+      // Skip a per-call `xcrun simctl list devices` here: that command takes
+      // hundreds of ms and was running on every tap / drag step / key press,
+      // making interactions feel sluggish. The Swift bridge already validates
+      // the device is booted when the daemon is created, and exits if the
+      // device shuts down — at which point `ensureInteractionDaemon` will
+      // re-create it and surface a clear error.
+      const daemon = await ensureInteractionDaemon(input.udid);
 
       switch (input.kind) {
         case "tap":
-          await (
-            await ensureInteractionDaemon(input.udid)
-          ).send({
+          await daemon.send({
             kind: "tap",
             x: input.x,
             y: input.y,
           });
           return { ok: true };
         case "drag":
-          await (
-            await ensureInteractionDaemon(input.udid)
-          ).send({
+          await daemon.send({
             kind: "drag",
             fromX: input.fromX,
             fromY: input.fromY,
@@ -586,17 +583,13 @@ const interact: IosSimulatorShape["interact"] = (input) =>
           });
           return { ok: true };
         case "type":
-          await (
-            await ensureInteractionDaemon(input.udid)
-          ).send({
+          await daemon.send({
             kind: "type",
             text: input.text,
           });
           return { ok: true };
         case "press":
-          await (
-            await ensureInteractionDaemon(input.udid)
-          ).send({
+          await daemon.send({
             kind: "press",
             key: input.key,
           });
@@ -616,13 +609,10 @@ const createMjpegStream: IosSimulatorShape["createMjpegStream"] = (input) =>
         throw createSimulatorError(supportReason ?? "iOS Simulator support is unavailable.");
       }
 
-      const device = await resolveDeviceByUdid(input.udid);
-      if (device.state !== "booted") {
-        throw createSimulatorError(
-          "The selected iOS Simulator device must be booted before streaming starts.",
-        );
-      }
-
+      // The Swift bridge process validates that the device exists and is
+      // booted before it starts producing frames; skipping the redundant
+      // `xcrun simctl list devices` here trims hundreds of ms off the time
+      // between opening the panel and seeing the first frame.
       const binaryPath = await resolveSimulatorBridgeBinaryPath();
       const targetIntervalMs = input.intervalMs ?? Math.round(1000 / DEFAULT_STREAM_FPS);
       const fps = Math.max(1, Math.round(1000 / Math.max(16, targetIntervalMs)));
