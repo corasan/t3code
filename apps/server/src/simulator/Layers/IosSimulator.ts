@@ -1,8 +1,9 @@
 import { mkdir, readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import readline from "node:readline";
+import { fileURLToPath } from "node:url";
 
 import {
   type IosSimulatorBootResult,
@@ -17,7 +18,7 @@ import { Effect, Layer, Schema } from "effect";
 import { runProcess } from "../../processRunner.ts";
 import { IosSimulator, type IosSimulatorShape } from "../Services/IosSimulator.ts";
 
-const DEFAULT_STREAM_FPS = 15;
+const DEFAULT_STREAM_FPS = 30;
 const MJPEG_BOUNDARY = "t3code-ios-simulator-frame";
 const EXPO_CONFIG_CANDIDATES = [
   "app.json",
@@ -31,9 +32,7 @@ const IOS_RUNTIME_RE = /\bios\b/i;
 const SIMULATOR_BRIDGE_SOURCE_PATH = fileURLToPath(
   new URL("../bin/SimulatorBridge.swift", import.meta.url),
 );
-const SIMULATOR_BRIDGE_BINARY_NAME = "t3code-simulator-bridge-v2";
-const WINDOW_INFO_RETRY_ATTEMPTS = 12;
-const WINDOW_INFO_RETRY_DELAY_MS = 125;
+const SIMULATOR_BRIDGE_BINARY_NAME = "t3code-simulator-device-bridge-v3";
 
 interface SimctlListDevicesResponse {
   readonly devices?: Record<string, ReadonlyArray<SimctlDeviceJson>>;
@@ -47,33 +46,43 @@ interface SimctlDeviceJson {
   readonly lastBootedAt?: string;
 }
 
-interface SimulatorWindowInfo {
-  readonly windowId: number;
-  readonly x: number;
-  readonly y: number;
-  readonly width: number;
-  readonly height: number;
+interface LengthPrefixedFrameState {
+  buffer: Buffer;
+  expectedLength: number | null;
 }
 
-interface SimulatorDisplayMetadata {
-  readonly width: number;
-  readonly height: number;
+interface SimulatorBridgeResponse {
+  readonly id: number | null;
+  readonly type: "ready" | "response";
+  readonly ok: boolean;
+  readonly error: string | null;
+}
+
+interface SimulatorInteractionDaemon {
+  readonly child: ReturnType<typeof spawn>;
+  readonly output: readline.Interface;
+  readonly send: (command: {
+    readonly kind: "tap" | "drag" | "type" | "press";
+    readonly x?: number;
+    readonly y?: number;
+    readonly fromX?: number;
+    readonly fromY?: number;
+    readonly toX?: number;
+    readonly toY?: number;
+    readonly text?: string;
+    readonly key?: string;
+  }) => Promise<void>;
+  readonly close: () => void;
 }
 
 let simulatorBridgeBinaryPathPromise: Promise<string> | null = null;
-const simulatorDisplayMetadataCache = new Map<string, SimulatorDisplayMetadata>();
+const simulatorInteractionDaemonPromises = new Map<string, Promise<SimulatorInteractionDaemon>>();
 
 function createSimulatorError(message: string, cause?: unknown): SimulatorError {
   return new SimulatorError(cause === undefined ? { message } : { message, cause });
 }
 
 const isSimulatorError = Schema.is(SimulatorError);
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
 
 function formatRuntimeIdentifier(identifier: string): string {
   const raw = identifier.split("SimRuntime.")[1] ?? identifier;
@@ -114,7 +123,7 @@ export function selectPreferredIosSimulatorDevice(
     return [isBooted ? 1 : 0, isIphone ? 1 : 0, sortableLastBootedAt, device.name] as const;
   };
 
-  return [...devices].sort((left, right) => {
+  return devices.toSorted((left, right) => {
     const leftScore = score(left);
     const rightScore = score(right);
     return (
@@ -133,14 +142,6 @@ function encodeMjpegFrame(frame: Uint8Array): Uint8Array {
   );
   const footer = Buffer.from("\r\n", "utf8");
   return Buffer.concat([header, Buffer.from(frame), footer]);
-}
-
-function launchSimulatorApp(udid: string): void {
-  const child = spawn("open", ["-a", "Simulator", "--args", "-CurrentDeviceUDID", udid], {
-    detached: true,
-    stdio: "ignore",
-  });
-  child.unref();
 }
 
 async function resolveSimulatorBridgeBinaryPath(): Promise<string> {
@@ -169,21 +170,13 @@ async function resolveSimulatorBridgeBinaryPath(): Promise<string> {
         "swiftc",
         [
           "-framework",
-          "AppKit",
-          "-framework",
-          "ApplicationServices",
-          "-framework",
           "CoreGraphics",
           "-framework",
           "CoreImage",
           "-framework",
-          "CoreMedia",
-          "-framework",
-          "CoreVideo",
+          "IOSurface",
           "-framework",
           "ImageIO",
-          "-framework",
-          "ScreenCaptureKit",
           SIMULATOR_BRIDGE_SOURCE_PATH,
           "-o",
           binaryPath,
@@ -203,190 +196,166 @@ async function resolveSimulatorBridgeBinaryPath(): Promise<string> {
   return simulatorBridgeBinaryPathPromise;
 }
 
-async function runSimulatorBridge(args: ReadonlyArray<string>): Promise<string> {
+async function createInteractionDaemon(udid: string): Promise<SimulatorInteractionDaemon> {
   const binaryPath = await resolveSimulatorBridgeBinaryPath();
-  const result = await runProcess(binaryPath, args, {
-    timeoutMs: 30_000,
-    maxBufferBytes: 16 * 1024 * 1024,
+  const child = spawn(binaryPath, ["serve", udid], {
+    stdio: "pipe",
   });
-  return result.stdout;
-}
-
-function resolveSimulatorDisplayRect(
-  windowInfo: SimulatorWindowInfo,
-  displayMetadata: SimulatorDisplayMetadata,
-) {
-  const scale = Math.min(
-    windowInfo.width / displayMetadata.width,
-    windowInfo.height / displayMetadata.height,
-  );
-  const width = displayMetadata.width * scale;
-  const height = displayMetadata.height * scale;
-  return {
-    x: windowInfo.x + (windowInfo.width - width) / 2,
-    y: windowInfo.y + (windowInfo.height - height),
-    width,
-    height,
-  };
-}
-
-function normalizeAbsolutePoint(
-  windowInfo: SimulatorWindowInfo,
-  displayMetadata: SimulatorDisplayMetadata,
-  x: number,
-  y: number,
-) {
-  const rect = resolveSimulatorDisplayRect(windowInfo, displayMetadata);
-  return {
-    x: rect.x + rect.width * x,
-    y: rect.y + rect.height * y,
-  };
-}
-
-function parseJpegDimensions(buffer: Buffer): SimulatorDisplayMetadata | null {
-  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) {
-    return null;
-  }
-
-  let offset = 2;
-  while (offset + 8 < buffer.length) {
-    if (buffer[offset] !== 0xff) {
-      offset += 1;
-      continue;
+  const output = readline.createInterface({ input: child.stdout });
+  const pendingRequests = new Map<
+    number,
+    {
+      readonly resolve: () => void;
+      readonly reject: (error: Error) => void;
+      readonly timeout: ReturnType<typeof setTimeout>;
     }
-    const marker = buffer[offset + 1]!;
-    offset += 2;
+  >();
+  let nextRequestId = 1;
+  let stderr = "";
+  let ready = false;
 
-    if (marker === 0xd8 || marker === 0xd9) {
-      continue;
-    }
-
-    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
-      continue;
-    }
-
-    if (offset + 2 > buffer.length) {
-      break;
-    }
-    const segmentLength = buffer.readUInt16BE(offset);
-    if (segmentLength < 2 || offset + segmentLength > buffer.length) {
-      break;
-    }
-
-    const isStartOfFrame =
-      (marker >= 0xc0 && marker <= 0xc3) ||
-      (marker >= 0xc5 && marker <= 0xc7) ||
-      (marker >= 0xc9 && marker <= 0xcb) ||
-      (marker >= 0xcd && marker <= 0xcf);
-    if (isStartOfFrame) {
-      if (segmentLength < 7) {
-        return null;
-      }
-      const height = buffer.readUInt16BE(offset + 3);
-      const width = buffer.readUInt16BE(offset + 5);
-      if (width > 0 && height > 0) {
-        return { width, height };
-      }
-      return null;
-    }
-
-    offset += segmentLength;
-  }
-
-  return null;
-}
-
-async function captureSimulatorDisplayFrame(udid: string): Promise<{
-  readonly jpeg: Buffer;
-  readonly metadata: SimulatorDisplayMetadata;
-}> {
-  return await new Promise((resolve, reject) => {
-    const child = spawn(
-      "xcrun",
-      [
-        "simctl",
-        "io",
-        udid,
-        "screenshot",
-        "--type=jpeg",
-        "--display=internal",
-        "--mask=ignored",
-        "-",
-      ],
-      {
-        stdio: "pipe",
-      },
-    );
-
-    const stdoutChunks: Buffer[] = [];
-    let stderr = "";
-    let settled = false;
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-    }, 15_000);
-
-    const finalize = (callback: () => void) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      callback();
+  const readyPromise = new Promise<void>((resolve, reject) => {
+    const rejectReady = (message: string) => {
+      reject(new Error(message));
     };
 
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      stdoutChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    child.once("error", (error) => {
+      rejectReady(`Failed to start the simulator interaction bridge: ${error.message}`);
     });
 
     child.stderr.on("data", (chunk: Buffer | string) => {
       stderr += chunk.toString();
     });
 
-    child.once("error", (error) => {
-      finalize(() => {
-        reject(new Error(`Failed to capture the Simulator display: ${error.message}`));
-      });
+    output.on("line", (line) => {
+      let message: SimulatorBridgeResponse;
+      try {
+        message = JSON.parse(line) as SimulatorBridgeResponse;
+      } catch {
+        return;
+      }
+
+      if (message.type === "ready") {
+        if (!message.ok) {
+          rejectReady(message.error ?? "The simulator interaction bridge failed to become ready.");
+          return;
+        }
+        ready = true;
+        resolve();
+        return;
+      }
+
+      if (message.type !== "response" || message.id === null) {
+        return;
+      }
+
+      const pendingRequest = pendingRequests.get(message.id);
+      if (!pendingRequest) {
+        return;
+      }
+      pendingRequests.delete(message.id);
+      clearTimeout(pendingRequest.timeout);
+      if (message.ok) {
+        pendingRequest.resolve();
+        return;
+      }
+      pendingRequest.reject(
+        new Error(message.error ?? "The simulator interaction bridge rejected the request."),
+      );
     });
 
-    child.once("close", (code, signal) => {
-      finalize(() => {
-        if (timedOut) {
-          reject(new Error("Timed out while capturing the Simulator display."));
-          return;
-        }
-        if (code !== 0) {
-          reject(
-            new Error(
-              stderr.trim() ||
-                `Simulator display capture failed (code=${code ?? "null"}, signal=${signal ?? "null"}).`,
-            ),
-          );
-          return;
-        }
-
-        const jpeg = Buffer.concat(stdoutChunks);
-        const metadata = parseJpegDimensions(jpeg);
-        if (!metadata) {
-          reject(new Error("Simulator display capture returned an invalid JPEG frame."));
-          return;
-        }
-
-        simulatorDisplayMetadataCache.set(udid, metadata);
-        resolve({ jpeg, metadata });
-      });
+    child.once("close", (code) => {
+      const detail = stderr.trim() || `exit code ${code ?? "null"}`;
+      if (!ready) {
+        rejectReady(`The simulator interaction bridge exited before readiness: ${detail}`);
+      }
+      for (const request of pendingRequests.values()) {
+        clearTimeout(request.timeout);
+        request.reject(
+          new Error(`The simulator interaction bridge stopped unexpectedly: ${detail}`),
+        );
+      }
+      pendingRequests.clear();
+      output.close();
+      simulatorInteractionDaemonPromises.delete(udid);
     });
   });
+
+  await readyPromise;
+
+  return {
+    child,
+    output,
+    send(command) {
+      const id = nextRequestId++;
+      const payload = JSON.stringify({ id, ...command });
+      return new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          pendingRequests.delete(id);
+          reject(new Error("The simulator interaction bridge timed out."));
+        }, 5_000);
+        pendingRequests.set(id, { resolve, reject, timeout });
+        child.stdin.write(`${payload}\n`, (error) => {
+          if (!error) {
+            return;
+          }
+          clearTimeout(timeout);
+          pendingRequests.delete(id);
+          reject(
+            new Error(`Failed to write to the simulator interaction bridge: ${error.message}`),
+          );
+        });
+      });
+    },
+    close() {
+      output.close();
+      if (!child.killed) {
+        child.kill("SIGTERM");
+      }
+    },
+  };
 }
 
-async function resolveSimulatorDisplayMetadata(udid: string): Promise<SimulatorDisplayMetadata> {
-  const cached = simulatorDisplayMetadataCache.get(udid);
-  if (cached) {
-    return cached;
+async function ensureInteractionDaemon(udid: string): Promise<SimulatorInteractionDaemon> {
+  const existing = simulatorInteractionDaemonPromises.get(udid);
+  if (existing) {
+    return await existing;
   }
-  const frame = await captureSimulatorDisplayFrame(udid);
-  return frame.metadata;
+
+  const created = createInteractionDaemon(udid).catch((error) => {
+    simulatorInteractionDaemonPromises.delete(udid);
+    throw error;
+  });
+  simulatorInteractionDaemonPromises.set(udid, created);
+  return await created;
+}
+
+function parseLengthPrefixedFrames(
+  state: LengthPrefixedFrameState,
+  chunk: Buffer,
+): ReadonlyArray<Buffer> {
+  state.buffer = state.buffer.length === 0 ? chunk : Buffer.concat([state.buffer, chunk]);
+  const frames: Buffer[] = [];
+
+  for (;;) {
+    if (state.expectedLength === null) {
+      if (state.buffer.length < 4) {
+        break;
+      }
+      state.expectedLength = state.buffer.readUInt32BE(0);
+      state.buffer = state.buffer.subarray(4);
+    }
+
+    if (state.buffer.length < state.expectedLength) {
+      break;
+    }
+
+    frames.push(state.buffer.subarray(0, state.expectedLength));
+    state.buffer = state.buffer.subarray(state.expectedLength);
+    state.expectedLength = null;
+  }
+
+  return frames;
 }
 
 function isExpectedSimctlBootError(stderr: string): boolean {
@@ -487,35 +456,9 @@ async function resolveDeviceByUdid(udid: string): Promise<IosSimulatorDevice> {
   return device;
 }
 
-async function resolveSimulatorWindowInfo(udid: string): Promise<SimulatorWindowInfo> {
-  let lastError: unknown;
-
-  for (let attempt = 0; attempt < WINDOW_INFO_RETRY_ATTEMPTS; attempt += 1) {
-    try {
-      launchSimulatorApp(udid);
-      const stdout = await runSimulatorBridge(["window-info"]);
-      const parsed = JSON.parse(stdout) as SimulatorWindowInfo;
-      if (parsed.width > 0 && parsed.height > 0) {
-        return parsed;
-      }
-      lastError = new Error("Simulator window has invalid bounds.");
-    } catch (error) {
-      lastError = error;
-    }
-
-    await sleep(WINDOW_INFO_RETRY_DELAY_MS);
-  }
-
-  throw createSimulatorError(
-    "Unable to locate the Simulator window. Make sure the Simulator app is allowed to be captured and automated.",
-    lastError,
-  );
-}
-
 const supported =
   process.platform === "darwin" &&
   isCommandAvailable("xcrun") &&
-  isCommandAvailable("open", { platform: "darwin" }) &&
   isCommandAvailable("swiftc", { platform: "darwin" });
 
 const supportReason =
@@ -525,9 +468,7 @@ const supportReason =
       ? "xcrun is not available in the current shell environment."
       : !isCommandAvailable("swiftc", { platform: "darwin" })
         ? "swiftc is unavailable, so the simulator bridge cannot be built."
-        : !isCommandAvailable("open", { platform: "darwin" })
-          ? "The macOS open command is unavailable."
-          : null;
+        : null;
 
 const getProjectState: IosSimulatorShape["getProjectState"] = (input) =>
   Effect.tryPromise({
@@ -593,12 +534,13 @@ const boot: IosSimulatorShape["boot"] = (input) =>
       await runProcess("xcrun", ["simctl", "bootstatus", input.udid, "-b"], {
         timeoutMs: 120_000,
       });
-      launchSimulatorApp(input.udid);
 
       const device = await resolveDeviceByUdid(input.udid);
       if (device.state !== "booted") {
         throw createSimulatorError("The selected iOS Simulator device did not finish booting.");
       }
+
+      await ensureInteractionDaemon(input.udid);
 
       return { device };
     },
@@ -623,37 +565,41 @@ const interact: IosSimulatorShape["interact"] = (input) =>
       }
 
       switch (input.kind) {
-        case "tap": {
-          const windowInfo = await resolveSimulatorWindowInfo(input.udid);
-          const displayMetadata = await resolveSimulatorDisplayMetadata(input.udid);
-          const point = normalizeAbsolutePoint(windowInfo, displayMetadata, input.x, input.y);
-          await runSimulatorBridge(["click", String(point.x), String(point.y)]);
+        case "tap":
+          await (
+            await ensureInteractionDaemon(input.udid)
+          ).send({
+            kind: "tap",
+            x: input.x,
+            y: input.y,
+          });
           return { ok: true };
-        }
-        case "drag": {
-          const windowInfo = await resolveSimulatorWindowInfo(input.udid);
-          const displayMetadata = await resolveSimulatorDisplayMetadata(input.udid);
-          const from = normalizeAbsolutePoint(
-            windowInfo,
-            displayMetadata,
-            input.fromX,
-            input.fromY,
-          );
-          const to = normalizeAbsolutePoint(windowInfo, displayMetadata, input.toX, input.toY);
-          await runSimulatorBridge([
-            "drag",
-            String(from.x),
-            String(from.y),
-            String(to.x),
-            String(to.y),
-          ]);
+        case "drag":
+          await (
+            await ensureInteractionDaemon(input.udid)
+          ).send({
+            kind: "drag",
+            fromX: input.fromX,
+            fromY: input.fromY,
+            toX: input.toX,
+            toY: input.toY,
+          });
           return { ok: true };
-        }
         case "type":
-          await runSimulatorBridge(["type", input.text]);
+          await (
+            await ensureInteractionDaemon(input.udid)
+          ).send({
+            kind: "type",
+            text: input.text,
+          });
           return { ok: true };
         case "press":
-          await runSimulatorBridge(["press", input.key]);
+          await (
+            await ensureInteractionDaemon(input.udid)
+          ).send({
+            kind: "press",
+            key: input.key,
+          });
           return { ok: true };
       }
     },
@@ -677,45 +623,69 @@ const createMjpegStream: IosSimulatorShape["createMjpegStream"] = (input) =>
         );
       }
 
+      const binaryPath = await resolveSimulatorBridgeBinaryPath();
       const targetIntervalMs = input.intervalMs ?? Math.round(1000 / DEFAULT_STREAM_FPS);
-      const firstFrame = await captureSimulatorDisplayFrame(input.udid);
+      const fps = Math.max(1, Math.round(1000 / Math.max(16, targetIntervalMs)));
+
+      let child: ReturnType<typeof spawn> | null = null;
       let cancelled = false;
 
       return new ReadableStream<Uint8Array>({
         start(controller) {
-          launchSimulatorApp(input.udid);
-          controller.enqueue(encodeMjpegFrame(firstFrame.jpeg));
+          const streamChild = spawn(binaryPath, ["stream-device", input.udid, String(fps)], {
+            stdio: "pipe",
+          });
+          child = streamChild;
+          const parseState: LengthPrefixedFrameState = {
+            buffer: Buffer.alloc(0),
+            expectedLength: null,
+          };
+          let stderr = "";
 
-          void (async () => {
-            for (;;) {
-              if (cancelled) {
-                return;
-              }
-              await sleep(targetIntervalMs);
-              if (cancelled) {
-                return;
-              }
-
-              try {
-                const frame = await captureSimulatorDisplayFrame(input.udid);
-                if (cancelled) {
-                  return;
-                }
-                controller.enqueue(encodeMjpegFrame(frame.jpeg));
-              } catch (error) {
-                if (cancelled) {
-                  return;
-                }
-                controller.error(
-                  createSimulatorError("Failed to capture the iOS Simulator display.", error),
-                );
-                return;
-              }
+          streamChild.stdout.on("data", (chunk: Buffer | string) => {
+            if (cancelled) {
+              return;
             }
-          })();
+            const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+            for (const frame of parseLengthPrefixedFrames(parseState, buffer)) {
+              controller.enqueue(encodeMjpegFrame(frame));
+            }
+          });
+
+          streamChild.stderr.on("data", (chunk: Buffer | string) => {
+            stderr += chunk.toString();
+          });
+
+          streamChild.once("error", (error) => {
+            if (cancelled) {
+              return;
+            }
+            controller.error(
+              createSimulatorError("Failed to start the Simulator device stream bridge.", error),
+            );
+          });
+
+          streamChild.once("close", (code) => {
+            if (cancelled) {
+              return;
+            }
+            if (code === 0) {
+              controller.close();
+              return;
+            }
+            controller.error(
+              createSimulatorError(
+                "The Simulator device stream bridge stopped unexpectedly.",
+                new Error(stderr.trim() || `exit code ${code ?? "null"}`),
+              ),
+            );
+          });
         },
         cancel() {
           cancelled = true;
+          if (child && !child.killed) {
+            child.kill("SIGTERM");
+          }
         },
       });
     },

@@ -336,14 +336,16 @@ const SimulatorPanel = memo(function SimulatorPanel({
               }
               bootMutation.mutate(selectedDeviceUdid);
             }}
-            disabled={!selectedDeviceUdid || bootMutation.isPending}
+            disabled={
+              !selectedDeviceUdid || bootMutation.isPending || selectedDevice?.state === "booted"
+            }
           >
             {bootMutation.isPending ? (
               <LoaderIcon className="size-3.5 animate-spin" />
             ) : (
               <PlayIcon className="size-3.5" />
             )}
-            {selectedDevice?.state === "booted" ? "Open" : "Boot"}
+            {selectedDevice?.state === "booted" ? "Ready" : "Boot"}
           </Button>
         </div>
 
