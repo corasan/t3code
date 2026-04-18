@@ -74,6 +74,20 @@ final class DeviceStreamer {
     private var frameIndex: Int64 = 0
     private var scratchPacket = Data(capacity: 256 * 1024)
 
+    // Stdout is a blocking pipe with a ~64 KB kernel buffer. When the Node
+    // reader stalls for a tick, `FileHandle.standardOutput.write` blocks
+    // and encoded frames queue up on `writeQueue` — every frame the
+    // browser sees is then permanently late. The lock below guards the
+    // small amount of state we need to skip non-keyframes under pressure
+    // and request a fresh IDR so the decoder can resync cleanly.
+    private let writeStateLock = NSLock()
+    private var pendingWriteBytes = 0
+    private var needsKeyframe = false
+    // ~48 KB ≈ 50 ms of encoded video at 6 Mbps. Past this point dropping
+    // costs the viewer nothing (the frame is already stale by the time
+    // it leaves the pipe) and frees the writer to catch up.
+    private let maxPendingWriteBytes = 48 * 1024
+
     init(surface: IOSurfaceRef, fps: Int) {
         let clamped = max(1, min(fps, 120))
         self.surface = surface
@@ -114,12 +128,21 @@ final class DeviceStreamer {
 
         var session: VTCompressionSession?
         let refcon = Unmanaged.passUnretained(self).toOpaque()
+        // Opt into Apple's low-latency encoder (WWDC 2021, macOS 11.3+).
+        // This swaps the default rate controller for one tuned for
+        // real-time applications (faster rate adaptation, tighter frame-
+        // time targets, no look-ahead). Combined with `RealTime = true`
+        // below it is the single biggest latency lever VideoToolbox
+        // exposes.
+        let encoderSpecification: CFDictionary = [
+            kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue
+        ] as CFDictionary
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: width,
             height: height,
             codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil,
+            encoderSpecification: encoderSpecification,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
             outputCallback: DeviceStreamer.encoderCallback,
@@ -205,9 +228,11 @@ final class DeviceStreamer {
         frameIndex += 1
 
         // Tell the encoder to emit a fresh keyframe for the forced first
-        // frame so the client can configure its decoder immediately.
+        // frame — or when a previous tick dropped a delta under backpressure
+        // — so the client can configure or resync its decoder immediately.
+        let forceKeyframe = force || takeNeedsKeyframe()
         var frameProperties: CFDictionary?
-        if force {
+        if forceKeyframe {
             frameProperties = [
                 kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue
             ] as CFDictionary
@@ -241,6 +266,16 @@ final class DeviceStreamer {
         }
 
         let isKeyframe = Self.isKeyframe(sampleBuffer)
+
+        // If the writer is backed up, drop delta frames on the floor rather
+        // than letting them queue. Keyframes always go through — they're
+        // the only thing the decoder can use to recover, and they're rare
+        // enough that their size doesn't dominate.
+        if !isKeyframe && isWriterBackedUp() {
+            requestKeyframe()
+            return
+        }
+
         scratchPacket.removeAll(keepingCapacity: true)
 
         // Prepend SPS + PPS (Annex-B) on every keyframe so a mid-stream
@@ -348,12 +383,43 @@ final class DeviceStreamer {
             return
         }
         let packetCopy = Data(packet)
-        writeQueue.async {
+        let frameBytes = packetCopy.count + 4
+        addPendingWriteBytes(frameBytes)
+        writeQueue.async { [weak self] in
             var length = UInt32(packetCopy.count).bigEndian
             let header = withUnsafeBytes(of: &length) { Data($0) }
             FileHandle.standardOutput.write(header)
             FileHandle.standardOutput.write(packetCopy)
+            self?.addPendingWriteBytes(-frameBytes)
         }
+    }
+
+    // MARK: - Writer backpressure
+
+    private func isWriterBackedUp() -> Bool {
+        writeStateLock.lock()
+        defer { writeStateLock.unlock() }
+        return pendingWriteBytes > maxPendingWriteBytes
+    }
+
+    private func requestKeyframe() {
+        writeStateLock.lock()
+        needsKeyframe = true
+        writeStateLock.unlock()
+    }
+
+    private func takeNeedsKeyframe() -> Bool {
+        writeStateLock.lock()
+        defer { writeStateLock.unlock() }
+        let requested = needsKeyframe
+        needsKeyframe = false
+        return requested
+    }
+
+    private func addPendingWriteBytes(_ delta: Int) {
+        writeStateLock.lock()
+        pendingWriteBytes += delta
+        writeStateLock.unlock()
     }
 }
 

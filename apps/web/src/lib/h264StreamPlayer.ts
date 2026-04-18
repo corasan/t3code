@@ -55,6 +55,38 @@ export function startH264StreamPlayer(options: H264StreamPlayerOptions): H264Str
   let firstFrameAnnounced = false;
   let configured = false;
   let decoder: VideoDecoder | null = null;
+  // Single-slot "latest frame wins" queue. If the decoder outputs a new
+  // frame before we've had a chance to paint the previous one, the older
+  // frame is stale by definition — close it immediately (freeing GPU
+  // memory) and keep the newest. Painting itself is deferred to the next
+  // animation frame so canvas draws stay aligned with vsync and we never
+  // do >1 `drawImage` per displayed frame.
+  let pendingFrame: VideoFrame | null = null;
+  let rafHandle = 0;
+
+  const drawPendingFrame = () => {
+    rafHandle = 0;
+    const frame = pendingFrame;
+    if (!frame) {
+      return;
+    }
+    pendingFrame = null;
+    try {
+      if (canvas.width !== frame.displayWidth) {
+        canvas.width = frame.displayWidth;
+      }
+      if (canvas.height !== frame.displayHeight) {
+        canvas.height = frame.displayHeight;
+      }
+      context.drawImage(frame, 0, 0);
+      if (!firstFrameAnnounced) {
+        firstFrameAnnounced = true;
+        onFirstFrame?.();
+      }
+    } finally {
+      frame.close();
+    }
+  };
 
   const emitError = (error: unknown) => {
     if (lifecycle.stopped) {
@@ -69,20 +101,16 @@ export function startH264StreamPlayer(options: H264StreamPlayerOptions): H264Str
     }
     const created = new VideoDecoder({
       output: (frame) => {
-        try {
-          if (canvas.width !== frame.displayWidth) {
-            canvas.width = frame.displayWidth;
-          }
-          if (canvas.height !== frame.displayHeight) {
-            canvas.height = frame.displayHeight;
-          }
-          context.drawImage(frame, 0, 0);
-          if (!firstFrameAnnounced) {
-            firstFrameAnnounced = true;
-            onFirstFrame?.();
-          }
-        } finally {
+        if (lifecycle.stopped) {
           frame.close();
+          return;
+        }
+        if (pendingFrame) {
+          pendingFrame.close();
+        }
+        pendingFrame = frame;
+        if (rafHandle === 0) {
+          rafHandle = requestAnimationFrame(drawPendingFrame);
         }
       },
       error: (error) => emitError(error),
@@ -179,6 +207,14 @@ export function startH264StreamPlayer(options: H264StreamPlayerOptions): H264Str
       }
       lifecycle.stopped = true;
       controller.abort();
+      if (rafHandle !== 0) {
+        cancelAnimationFrame(rafHandle);
+        rafHandle = 0;
+      }
+      if (pendingFrame) {
+        pendingFrame.close();
+        pendingFrame = null;
+      }
       if (decoder) {
         try {
           decoder.close();
