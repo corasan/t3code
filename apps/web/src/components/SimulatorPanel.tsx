@@ -514,10 +514,16 @@ const SimulatorPanel = memo(function SimulatorPanel({
 
         {eligible ? (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center gap-4">
-            <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center self-stretch">
+            <div
+              className="flex min-h-0 min-w-0 flex-1 items-center justify-center self-stretch"
+              style={{ containerType: "size" }}
+            >
               <div
-                className="relative h-full max-h-full w-auto max-w-full overflow-hidden rounded-[2.5rem] border border-border/60 bg-neutral-950 p-1.5 shadow-[0_30px_80px_-40px_rgba(0,0,0,0.55)] dark:border-white/10"
-                style={{ aspectRatio: effectiveAspect }}
+                className="relative overflow-hidden rounded-[2.5rem] border border-border/60 bg-neutral-950 p-1.5 shadow-[0_30px_80px_-40px_rgba(0,0,0,0.55)] dark:border-white/10"
+                style={{
+                  aspectRatio: effectiveAspect,
+                  height: `min(100cqh, calc(100cqw / ${effectiveAspect}))`,
+                }}
               >
                 <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-[2.05rem] bg-black">
                   {streamOverlayMessage ? (
