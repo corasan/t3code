@@ -42,8 +42,11 @@ const DIFF_INLINE_SIDEBAR_WIDTH_STORAGE_KEY = "chat_diff_sidebar_width";
 const DIFF_INLINE_DEFAULT_WIDTH = "clamp(28rem,48vw,44rem)";
 const DIFF_INLINE_SIDEBAR_MIN_WIDTH = 26 * 16;
 const SIMULATOR_INLINE_SIDEBAR_WIDTH_STORAGE_KEY = "chat_simulator_sidebar_width";
-const SIMULATOR_INLINE_DEFAULT_WIDTH = "clamp(24rem,34vw,30rem)";
-const SIMULATOR_INLINE_SIDEBAR_MIN_WIDTH = 22 * 16;
+// Default width tracks the iPhone frame: (viewport height − chrome) × aspect + padding.
+// Aspect 0.4615 ≈ 9/19.5 matches the iPhone stream; chrome ≈ 10rem (header + toolbar + gaps).
+const SIMULATOR_INLINE_DEFAULT_WIDTH =
+  "clamp(18rem, calc((100dvh - 10rem) * 0.4615 + 1.5rem), 26rem)";
+const SIMULATOR_INLINE_SIDEBAR_MIN_WIDTH = 18 * 16;
 const COMPOSER_COMPACT_MIN_LEFT_CONTROLS_WIDTH_PX = 208;
 
 const DiffLoadingFallback = (props: { mode: DiffPanelMode }) => {
@@ -331,7 +334,6 @@ function ChatThreadRouteView() {
             <SimulatorPanel
               environmentId={threadRef.environmentId}
               projectCwd={activeProject?.cwd ?? null}
-              mode="sidebar"
               onClose={closeSimulator}
             />
           </RightPanelInlineSidebar>
@@ -359,7 +361,6 @@ function ChatThreadRouteView() {
           <SimulatorPanel
             environmentId={threadRef.environmentId}
             projectCwd={activeProject?.cwd ?? null}
-            mode="sheet"
             onClose={closeSimulator}
           />
         ) : null}

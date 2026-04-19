@@ -28,8 +28,6 @@ import {
   iosSimulatorStateQueryOptions,
   simulatorQueryKeys,
 } from "~/lib/simulatorReactQuery";
-import { cn } from "~/lib/utils";
-
 import { resolveSelectedIosSimulatorDeviceUdid } from "./SimulatorPanel.logic";
 import {
   hasSimulatorBootSignal,
@@ -46,7 +44,6 @@ import { toastManager } from "./ui/toast";
 interface SimulatorPanelProps {
   environmentId: EnvironmentId;
   projectCwd: string | null;
-  mode?: "sheet" | "sidebar";
   onClose: () => void;
 }
 
@@ -93,7 +90,6 @@ function normalizePointerPosition(
 const SimulatorPanel = memo(function SimulatorPanel({
   environmentId,
   projectCwd,
-  mode = "sidebar",
   onClose,
 }: SimulatorPanelProps) {
   const queryClient = useQueryClient();
@@ -390,18 +386,7 @@ const SimulatorPanel = memo(function SimulatorPanel({
     void sendInteraction({ kind: "appSwitcher" });
   }, [sendInteraction]);
 
-  // Sidebar width is driven by the live stream's aspect ratio:
-  //   width = (viewport height − chrome) × streamAspect + inner padding.
-  // Falls back to an iPhone-X-ish ratio while the first frame decodes.
-  //   chromeHeight ≈ 10rem (panel header + p-3 + selector + toolbar + gaps)
-  //   horizontalPadding = 1.5rem (p-3 × 2)
   const effectiveAspect = streamAspect ?? 9 / 19.5;
-  const sidebarWidth = `clamp(17rem, calc((100dvh - 10rem) * ${effectiveAspect} + 1.5rem), 26rem)`;
-  const shellClassName =
-    mode === "sidebar"
-      ? "h-full shrink-0 border-l border-border/70"
-      : "h-full w-full";
-  const shellStyle = mode === "sidebar" ? { width: sidebarWidth } : undefined;
 
   const eligible = Boolean(simulatorState?.supported && simulatorState.isExpoProject);
   const canRenderStream = Boolean(streamUrl);
@@ -413,7 +398,7 @@ const SimulatorPanel = memo(function SimulatorPanel({
   const canSendHardwareButton = canRenderStream && selectedDeviceUdid !== null;
 
   return (
-    <div className={cn("flex min-h-0 flex-col bg-card/50", shellClassName)} style={shellStyle}>
+    <div className="flex h-full w-full min-h-0 flex-col bg-card/50">
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-border/60 px-3">
         <div className="flex items-center gap-2">
           <Badge
