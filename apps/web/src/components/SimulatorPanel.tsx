@@ -2,6 +2,8 @@ import type { EnvironmentId, IosSimulatorDevice } from "@t3tools/contracts";
 import { createEmptyIosSimulatorRuntimeState } from "@t3tools/shared/simulatorRuntime";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  CircleIcon,
+  LayoutGridIcon,
   LoaderIcon,
   PanelRightCloseIcon,
   PlayIcon,
@@ -26,12 +28,10 @@ import {
   iosSimulatorStateQueryOptions,
   simulatorQueryKeys,
 } from "~/lib/simulatorReactQuery";
-import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { cn } from "~/lib/utils";
 
 import { resolveSelectedIosSimulatorDeviceUdid } from "./SimulatorPanel.logic";
 import {
-  getSimulatorPanelLogTail,
   hasSimulatorBootSignal,
   isSimulatorFrameStale,
   readSimulatorPanelRuntimeDevice,
@@ -90,52 +90,6 @@ function normalizePointerPosition(
   return { x, y };
 }
 
-function formatSimulatorStatusLabel(value: string | null | undefined): string {
-  return (value ?? "idle").replaceAll("-", " ");
-}
-
-function getSimulatorStatusClass(value: string | null | undefined): string {
-  switch (value) {
-    case "ready":
-    case "streaming":
-    case "live":
-    case "succeeded":
-      return "border-emerald-400/20 bg-emerald-400/10 text-emerald-200";
-    case "booting":
-    case "connecting":
-    case "dispatching":
-      return "border-amber-300/20 bg-amber-300/10 text-amber-100";
-    case "error":
-    case "failed":
-    case "stale":
-      return "border-rose-400/20 bg-rose-400/10 text-rose-100";
-    default:
-      return "border-white/10 bg-white/5 text-slate-200/70";
-  }
-}
-
-function RuntimeStatusBadge({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone?: string | null;
-}) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] uppercase tracking-wide",
-        getSimulatorStatusClass(tone ?? value),
-      )}
-    >
-      <span className="text-slate-300/60">{label}</span>
-      <span className="capitalize">{formatSimulatorStatusLabel(value)}</span>
-    </span>
-  );
-}
-
 const SimulatorPanel = memo(function SimulatorPanel({
   environmentId,
   projectCwd,
@@ -180,10 +134,6 @@ const SimulatorPanel = memo(function SimulatorPanel({
     runtimeDevice: selectedRuntimeDevice,
   });
   const frameStale = isSimulatorFrameStale(selectedRuntimeDevice, nowMs);
-  const runtimeLogTail = useMemo(
-    () => getSimulatorPanelLogTail(runtimeState, selectedDeviceUdid),
-    [runtimeState, selectedDeviceUdid],
-  );
 
   const streamUrl =
     selectedDeviceUdid && hasBootedSignal && webCodecsSupported
@@ -294,7 +244,9 @@ const SimulatorPanel = memo(function SimulatorPanel({
         | { kind: "drag"; fromX: number; fromY: number; toX: number; toY: number }
         | { kind: "pointer"; phase: "began" | "moved" | "ended"; x: number; y: number }
         | { kind: "type"; text: string }
-        | { kind: "press"; key: string },
+        | { kind: "press"; key: string }
+        | { kind: "home" }
+        | { kind: "appSwitcher" },
       options?: { silent?: boolean },
     ) => {
       if (!selectedDeviceUdid) {
@@ -420,6 +372,14 @@ const SimulatorPanel = memo(function SimulatorPanel({
     [sendInteraction],
   );
 
+  const handleHomePress = useCallback(() => {
+    void sendInteraction({ kind: "home" });
+  }, [sendInteraction]);
+
+  const handleAppSwitcherPress = useCallback(() => {
+    void sendInteraction({ kind: "appSwitcher" });
+  }, [sendInteraction]);
+
   const shellClassName =
     mode === "sidebar"
       ? "h-full w-[min(32rem,42vw)] shrink-0 border-l border-border/70"
@@ -427,33 +387,12 @@ const SimulatorPanel = memo(function SimulatorPanel({
 
   const eligible = Boolean(simulatorState?.supported && simulatorState.isExpoProject);
   const canRenderStream = Boolean(streamUrl);
-  const lifecycleValue =
-    selectedRuntimeDevice?.lifecycleState ??
-    (selectedDevice?.state === "booted" ? "ready" : (selectedDevice?.state ?? "idle"));
-  const interactionValue = selectedRuntimeDevice?.interactionReady
-    ? "ready"
-    : bootMutation.isPending
-      ? "booting"
-      : "idle";
-  const streamValue = frameStale
-    ? "stale"
-    : (selectedRuntimeDevice?.frameStatus ?? (canRenderStream ? "connecting" : "idle"));
-  const inputValue = selectedRuntimeDevice?.inputStatus ?? "idle";
   const streamOverlayMessage = !canRenderStream
     ? null
     : frameStale || selectedRuntimeDevice?.frameStatus === "live"
       ? null
       : (selectedRuntimeDevice?.lastError ?? "Connecting to the live simulator stream...");
-  const lastFrameLabel = selectedRuntimeDevice?.lastFrameAt
-    ? `Last frame ${formatRelativeTimeLabel(selectedRuntimeDevice.lastFrameAt)}`
-    : canRenderStream
-      ? "Waiting for first frame"
-      : "Idle";
-  const runtimeSummary = selectedRuntimeDevice
-    ? `${selectedRuntimeDevice.frameCount} frames • ${selectedRuntimeDevice.viewerCount} viewer${
-        selectedRuntimeDevice.viewerCount === 1 ? "" : "s"
-      }`
-    : "Waiting for runtime events";
+  const canSendHardwareButton = canRenderStream && selectedDeviceUdid !== null;
 
   return (
     <div className={cn("flex min-h-0 flex-col bg-card/50", shellClassName)}>
@@ -566,35 +505,7 @@ const SimulatorPanel = memo(function SimulatorPanel({
         ) : null}
 
         {eligible ? (
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[1.75rem] border border-border/70 bg-[radial-gradient(circle_at_top,#1f293733,transparent_55%),linear-gradient(180deg,#0f172a,#020617)] p-3 shadow-[0_20px_60px_-30px_rgba(15,23,42,0.8)]">
-            <div className="mb-2 flex items-center justify-between gap-2 px-1">
-              <div className="flex items-center gap-2 text-[11px] text-slate-300/70">
-                <SmartphoneIcon className="size-3.5" />
-                <span>{selectedDevice?.runtime ?? "iOS Simulator"}</span>
-                <span className="text-slate-400/60">{lastFrameLabel}</span>
-              </div>
-              <Badge
-                variant="outline"
-                className={cn(
-                  "border-white/10 bg-white/5 text-[10px] uppercase tracking-wide text-slate-200/70",
-                  getSimulatorStatusClass(lifecycleValue),
-                )}
-              >
-                {formatSimulatorStatusLabel(lifecycleValue)}
-              </Badge>
-            </div>
-
-            <div className="mb-3 flex flex-wrap gap-1.5 px-1">
-              <RuntimeStatusBadge label="Lifecycle" value={lifecycleValue} />
-              <RuntimeStatusBadge
-                label="Bridge"
-                value={interactionValue}
-                tone={selectedRuntimeDevice?.interactionReady ? "ready" : interactionValue}
-              />
-              <RuntimeStatusBadge label="Stream" value={streamValue} />
-              <RuntimeStatusBadge label="Input" value={inputValue} />
-            </div>
-
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden rounded-[1.75rem] border border-border/70 bg-[radial-gradient(circle_at_top,#1f293733,transparent_55%),linear-gradient(180deg,#0f172a,#020617)] p-3 shadow-[0_20px_60px_-30px_rgba(15,23,42,0.8)]">
             <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-[1.4rem] border border-white/10 bg-black/70">
               {streamOverlayMessage ? (
                 <div className="pointer-events-none absolute inset-x-4 top-4 z-10 flex justify-center">
@@ -649,39 +560,27 @@ const SimulatorPanel = memo(function SimulatorPanel({
               )}
             </div>
 
-            <div className="mt-3 shrink-0 rounded-[1.1rem] border border-white/10 bg-black/25 p-3">
-              <div className="mb-2 flex items-center justify-between gap-2 text-[10px] uppercase tracking-[0.18em] text-slate-400/70">
-                <span>Runtime</span>
-                <span>{runtimeSummary}</span>
-              </div>
-              {runtimeLogTail.length === 0 ? (
-                <p className="text-[11px] text-slate-300/60">
-                  Waiting for simulator lifecycle, readiness, frame, and input events.
-                </p>
-              ) : (
-                <div className="max-h-28 space-y-1 overflow-auto font-mono text-[10px] leading-4 text-slate-200/75">
-                  {runtimeLogTail.map((entry) => (
-                    <div key={`${entry.sequence}:${entry.createdAt}`} className="flex gap-2">
-                      <span
-                        className={cn(
-                          "shrink-0 uppercase",
-                          entry.level === "error"
-                            ? "text-rose-200/90"
-                            : entry.level === "warn"
-                              ? "text-amber-100/90"
-                              : "text-emerald-100/90",
-                        )}
-                      >
-                        {entry.level}
-                      </span>
-                      <span className="shrink-0 text-slate-400/70">
-                        {formatRelativeTimeLabel(entry.createdAt)}
-                      </span>
-                      <span className="min-w-0 break-words text-slate-200/80">{entry.message}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
+            <div className="flex shrink-0 items-center justify-center gap-2">
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={handleAppSwitcherPress}
+                disabled={!canSendHardwareButton}
+                aria-label="Open the iOS app switcher"
+                className="size-9 rounded-full border border-white/10 bg-white/[0.03] text-slate-200/80 hover:bg-white/10 hover:text-white"
+              >
+                <LayoutGridIcon className="size-4" />
+              </Button>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={handleHomePress}
+                disabled={!canSendHardwareButton}
+                aria-label="Press the iOS home button"
+                className="size-9 rounded-full border border-white/10 bg-white/[0.03] text-slate-200/80 hover:bg-white/10 hover:text-white"
+              >
+                <CircleIcon className="size-4" />
+              </Button>
             </div>
           </div>
         ) : null}

@@ -127,7 +127,25 @@ const IosSimulatorPressKeyInput = Schema.Struct({
   key: TrimmedNonEmptyString,
 });
 
-export const IosSimulatorInputKind = Schema.Literals(["tap", "drag", "pointer", "type", "press"]);
+const IosSimulatorHomeButtonInput = Schema.Struct({
+  kind: Schema.Literal("home"),
+  udid: TrimmedNonEmptyString,
+});
+
+const IosSimulatorAppSwitcherInput = Schema.Struct({
+  kind: Schema.Literal("appSwitcher"),
+  udid: TrimmedNonEmptyString,
+});
+
+export const IosSimulatorInputKind = Schema.Literals([
+  "tap",
+  "drag",
+  "pointer",
+  "type",
+  "press",
+  "home",
+  "appSwitcher",
+]);
 export type IosSimulatorInputKind = typeof IosSimulatorInputKind.Type;
 
 export const IosSimulatorInteractInput = Schema.Union([
@@ -136,6 +154,8 @@ export const IosSimulatorInteractInput = Schema.Union([
   IosSimulatorPointerStreamInput,
   IosSimulatorTypeTextInput,
   IosSimulatorPressKeyInput,
+  IosSimulatorHomeButtonInput,
+  IosSimulatorAppSwitcherInput,
 ]);
 export type IosSimulatorInteractInput = typeof IosSimulatorInteractInput.Type;
 

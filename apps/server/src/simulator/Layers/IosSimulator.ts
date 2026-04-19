@@ -41,7 +41,7 @@ const IOS_RUNTIME_RE = /\bios\b/i;
 const SIMULATOR_BRIDGE_SOURCE_PATH = fileURLToPath(
   new URL("../bin/SimulatorBridge.swift", import.meta.url),
 );
-const SIMULATOR_BRIDGE_BINARY_NAME = "t3code-simulator-device-bridge-v5";
+const SIMULATOR_BRIDGE_BINARY_NAME = "t3code-simulator-device-bridge-v9";
 const FRAME_STATE_HEARTBEAT_MS = 1_000;
 const INITIAL_STREAM_FRAME_TIMEOUT_MS = 10_000;
 const STREAM_STALL_TIMEOUT_MS = 5_000;
@@ -69,7 +69,7 @@ interface SimulatorInteractionDaemon {
   readonly child: ReturnType<typeof spawn>;
   readonly output: readline.Interface;
   readonly send: (command: {
-    readonly kind: "tap" | "drag" | "pointer" | "type" | "press";
+    readonly kind: "tap" | "drag" | "pointer" | "type" | "press" | "home" | "appSwitcher";
     readonly phase?: "began" | "moved" | "ended";
     readonly x?: number;
     readonly y?: number;
@@ -947,6 +947,12 @@ function makeIosSimulator(input: {
               key: interactInput.key,
             });
             break;
+          case "home":
+            await daemon.send({ kind: "home" });
+            break;
+          case "appSwitcher":
+            await daemon.send({ kind: "appSwitcher" });
+            break;
         }
 
         if (shouldEmitInputState) {
@@ -958,9 +964,15 @@ function makeIosSimulator(input: {
         }
         return { ok: true };
       } catch (cause) {
+        const causeMessage = cause instanceof Error ? cause.message : null;
         const error = isSimulatorError(cause)
           ? cause
-          : createSimulatorError("The iOS Simulator input bridge failed.", cause);
+          : createSimulatorError(
+              causeMessage
+                ? `The iOS Simulator input bridge failed: ${causeMessage}`
+                : "The iOS Simulator input bridge failed.",
+              cause,
+            );
         input.runtimeEvents.inputState({
           udid: interactInput.udid,
           inputKind: interactInput.kind,

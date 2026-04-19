@@ -436,12 +436,14 @@ final class SimulatorBridge {
         CGSize,
         Int32
     ) -> UnsafeMutableRawPointer?
+    private typealias HardwareButtonFn = @convention(c) (Int32, Int32, Int32) -> UnsafeMutableRawPointer?
 
     private let coreSimulatorHandle: UnsafeMutableRawPointer?
     private let simulatorKitHandle: UnsafeMutableRawPointer?
     private let hidClientClass: AnyClass?
     private let keyboardFn: KeyboardFn?
     private let mouseFn: MouseFn?
+    private let hardwareButtonFn: HardwareButtonFn?
 
     private init() {
         let coreSimulatorPath = "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator"
@@ -463,6 +465,12 @@ final class SimulatorBridge {
             self.mouseFn = unsafeBitCast(ptr, to: MouseFn.self)
         } else {
             self.mouseFn = nil
+        }
+
+        if let handle = simulatorKitHandle, let ptr = dlsym(handle, "IndigoHIDMessageForButton") {
+            self.hardwareButtonFn = unsafeBitCast(ptr, to: HardwareButtonFn.self)
+        } else {
+            self.hardwareButtonFn = nil
         }
     }
 
@@ -525,6 +533,40 @@ final class SimulatorBridge {
         try sendKey(session: session, key: key, isDown: true)
         usleep(16_000)
         try sendKey(session: session, key: key, isDown: false)
+    }
+
+    func home(udid: String) throws {
+        let session = try createInteractiveSession(udid: udid)
+        try home(session: session)
+    }
+
+    func home(session: InteractiveSession) throws {
+        // Hardware home-button press via the same private Indigo pipeline
+        // `sendKey`/`sendTouch` already use. On modern iPhone simulators
+        // without a physical home button, CoreSimulator still accepts this
+        // event and routes it through to SpringBoard as the Home gesture.
+        // Constants mirror facebook/idb's `Indigo.h`:
+        //   ButtonEventSourceHomeButton = 0x0
+        //   ButtonEventTargetHardware   = 0x33
+        try sendHardwareButton(session: session, keyCode: 0x0, target: 0x33)
+    }
+
+    func appSwitcher(udid: String) throws {
+        let session = try createInteractiveSession(udid: udid)
+        try appSwitcher(session: session)
+    }
+
+    func appSwitcher(session: InteractiveSession) throws {
+        // Two home-button presses in quick succession. iOS's accessibility
+        // layer recognises this as "open App Switcher" on every simulator,
+        // Face-ID or Home-button, regardless of the device's physical
+        // layout — the same behaviour the Simulator app exposes when the
+        // user hits ⌘⇧H twice. Reliable HID call-sequencing beats trying
+        // to replay the swipe-up-and-hold gesture, whose recognition
+        // heuristics shift between iOS versions.
+        try home(session: session)
+        usleep(120_000)
+        try home(session: session)
     }
 
     func serve(udid: String) throws {
@@ -593,6 +635,10 @@ final class SimulatorBridge {
                 throw BridgeError.invalidRequest("press requires key")
             }
             try press(session: session, key: key)
+        case "home":
+            try home(session: session)
+        case "appSwitcher":
+            try appSwitcher(session: session)
         default:
             throw BridgeError.invalidRequest("unknown request kind \(request.kind)")
         }
@@ -764,6 +810,23 @@ final class SimulatorBridge {
         try sendIndigoMessage(client: session.hidClient, message: message)
     }
 
+    private func sendHardwareButton(session: InteractiveSession, keyCode: Int32, target: Int32) throws {
+        guard let hardwareButtonFn else {
+            throw BridgeError.hidUnavailable("Indigo hardware-button injection is unavailable.")
+        }
+        // Direction constants from facebook/idb's `Indigo.h`:
+        //   ButtonEventTypeDown = 0x1, ButtonEventTypeUp = 0x2
+        guard let downMessage = hardwareButtonFn(keyCode, 0x1, target) else {
+            throw BridgeError.sendFailed("Failed to build a hardware-button down message.")
+        }
+        try sendIndigoMessage(client: session.hidClient, message: downMessage)
+        usleep(50_000)
+        guard let upMessage = hardwareButtonFn(keyCode, 0x2, target) else {
+            throw BridgeError.sendFailed("Failed to build a hardware-button up message.")
+        }
+        try sendIndigoMessage(client: session.hidClient, message: upMessage)
+    }
+
     private func sendIndigoMessage(client: AnyObject, message: UnsafeMutableRawPointer, awaitCompletion: Bool = true) throws {
         let sendSelector = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
         guard client.responds(to: sendSelector) else {
@@ -923,6 +986,16 @@ func run() throws {
                 throw BridgeError.usage("press requires udid key")
             }
             try SimulatorBridge.shared.press(udid: args[1], key: args[2])
+        case "home":
+            guard args.count == 2 else {
+                throw BridgeError.usage("home requires udid")
+            }
+            try SimulatorBridge.shared.home(udid: args[1])
+        case "app-switcher":
+            guard args.count == 2 else {
+                throw BridgeError.usage("app-switcher requires udid")
+            }
+            try SimulatorBridge.shared.appSwitcher(udid: args[1])
         case "serve":
             guard args.count == 2 else {
                 throw BridgeError.usage("serve requires udid")
