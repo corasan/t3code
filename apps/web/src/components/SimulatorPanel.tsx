@@ -104,6 +104,10 @@ const SimulatorPanel = memo(function SimulatorPanel({
   const [runtimeState, setRuntimeState] = useState(createEmptyIosSimulatorRuntimeState);
   const [streamVersion, setStreamVersion] = useState(0);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  // Aspect ratio (width/height) of the decoded simulator stream. Used to
+  // drive the iPhone frame's aspect-ratio so the canvas fills edge-to-edge
+  // (no letterbox bars) and the sidebar width hugs the phone exactly.
+  const [streamAspect, setStreamAspect] = useState<number | null>(null);
 
   const simulatorStateQuery = useQuery({
     ...iosSimulatorStateQueryOptions({
@@ -204,9 +208,15 @@ const SimulatorPanel = memo(function SimulatorPanel({
     if (!canvas || !streamUrl) {
       return;
     }
+    setStreamAspect(null);
     const player = startH264StreamPlayer({
       canvas,
       streamUrl,
+      onDimensions: (width, height) => {
+        if (width > 0 && height > 0) {
+          setStreamAspect(width / height);
+        }
+      },
       onError: (error) => {
         toastManager.add({
           type: "error",
@@ -380,10 +390,18 @@ const SimulatorPanel = memo(function SimulatorPanel({
     void sendInteraction({ kind: "appSwitcher" });
   }, [sendInteraction]);
 
+  // Sidebar width is driven by the live stream's aspect ratio:
+  //   width = (viewport height − chrome) × streamAspect + inner padding.
+  // Falls back to an iPhone-X-ish ratio while the first frame decodes.
+  //   chromeHeight ≈ 10rem (panel header + p-3 + selector + toolbar + gaps)
+  //   horizontalPadding = 1.5rem (p-3 × 2)
+  const effectiveAspect = streamAspect ?? 9 / 19.5;
+  const sidebarWidth = `clamp(17rem, calc((100dvh - 10rem) * ${effectiveAspect} + 1.5rem), 26rem)`;
   const shellClassName =
     mode === "sidebar"
-      ? "h-full w-[min(32rem,42vw)] shrink-0 border-l border-border/70"
+      ? "h-full shrink-0 border-l border-border/70"
       : "h-full w-full";
+  const shellStyle = mode === "sidebar" ? { width: sidebarWidth } : undefined;
 
   const eligible = Boolean(simulatorState?.supported && simulatorState.isExpoProject);
   const canRenderStream = Boolean(streamUrl);
@@ -395,7 +413,7 @@ const SimulatorPanel = memo(function SimulatorPanel({
   const canSendHardwareButton = canRenderStream && selectedDeviceUdid !== null;
 
   return (
-    <div className={cn("flex min-h-0 flex-col bg-card/50", shellClassName)}>
+    <div className={cn("flex min-h-0 flex-col bg-card/50", shellClassName)} style={shellStyle}>
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-border/60 px-3">
         <div className="flex items-center gap-2">
           <Badge
@@ -449,7 +467,12 @@ const SimulatorPanel = memo(function SimulatorPanel({
             disabled={!devices.length}
           >
             <SelectTrigger size="sm" className="min-w-0 flex-1">
-              <SelectValue placeholder={devices.length ? "Choose a device" : "No devices found"} />
+              <SelectValue placeholder={devices.length ? "Choose a device" : "No devices found"}>
+                {(value) =>
+                  devices.find((device) => device.udid === value)?.name ??
+                  (devices.length ? "Choose a device" : "No devices found")
+                }
+              </SelectValue>
             </SelectTrigger>
             <SelectPopup>
               {devices.map((device) => (
@@ -505,59 +528,66 @@ const SimulatorPanel = memo(function SimulatorPanel({
         ) : null}
 
         {eligible ? (
-          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden rounded-[1.75rem] border border-border/70 bg-[radial-gradient(circle_at_top,#1f293733,transparent_55%),linear-gradient(180deg,#0f172a,#020617)] p-3 shadow-[0_20px_60px_-30px_rgba(15,23,42,0.8)]">
-            <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-[1.4rem] border border-white/10 bg-black/70">
-              {streamOverlayMessage ? (
-                <div className="pointer-events-none absolute inset-x-4 top-4 z-10 flex justify-center">
-                  <div className="rounded-full border border-white/10 bg-black/70 px-3 py-1 text-[11px] text-slate-200/85 shadow-lg backdrop-blur">
-                    {streamOverlayMessage}
-                  </div>
-                </div>
-              ) : null}
-              {canRenderStream ? (
-                <canvas
-                  key={streamUrl}
-                  ref={viewportRef}
-                  aria-label="Live iOS Simulator stream"
-                  role="img"
-                  className="max-h-full max-w-full select-none outline-none"
-                  tabIndex={0}
-                  onPointerDown={handlePointerDown}
-                  onPointerMove={handlePointerMove}
-                  onPointerUp={endPointerGesture}
-                  onPointerCancel={endPointerGesture}
-                  onKeyDown={handleKeyDown}
-                />
-              ) : (
-                <div className="flex max-w-sm flex-col items-center gap-3 px-6 text-center text-sm text-slate-300/75">
-                  <SmartphoneIcon className="size-8 text-slate-200/55" />
-                  <p>
-                    {selectedDevice
-                      ? "Boot the selected simulator to start the live interactive view."
-                      : "Choose a simulator device to begin."}
-                  </p>
-                  {selectedDevice && selectedDevice.state !== "booted" ? (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => {
-                        if (!selectedDeviceUdid) {
-                          return;
-                        }
-                        bootMutation.mutate(selectedDeviceUdid);
-                      }}
-                      disabled={bootMutation.isPending}
-                    >
-                      {bootMutation.isPending ? (
-                        <LoaderIcon className="size-3.5 animate-spin" />
-                      ) : (
-                        <PlayIcon className="size-3.5" />
-                      )}
-                      Boot And Open
-                    </Button>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center gap-4">
+            <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center self-stretch">
+              <div
+                className="relative h-full max-h-full w-auto max-w-full overflow-hidden rounded-[2.5rem] border border-border/60 bg-neutral-950 p-1.5 shadow-[0_30px_80px_-40px_rgba(0,0,0,0.55)] dark:border-white/10"
+                style={{ aspectRatio: effectiveAspect }}
+              >
+                <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-[2.05rem] bg-black">
+                  {streamOverlayMessage ? (
+                    <div className="pointer-events-none absolute inset-x-4 top-4 z-10 flex justify-center">
+                      <div className="rounded-full border border-white/10 bg-black/70 px-3 py-1 text-[11px] text-slate-200/85 shadow-lg backdrop-blur">
+                        {streamOverlayMessage}
+                      </div>
+                    </div>
                   ) : null}
+                  {canRenderStream ? (
+                    <canvas
+                      key={streamUrl}
+                      ref={viewportRef}
+                      aria-label="Live iOS Simulator stream"
+                      role="img"
+                      className="block h-full w-full select-none outline-none"
+                      tabIndex={0}
+                      onPointerDown={handlePointerDown}
+                      onPointerMove={handlePointerMove}
+                      onPointerUp={endPointerGesture}
+                      onPointerCancel={endPointerGesture}
+                      onKeyDown={handleKeyDown}
+                    />
+                  ) : (
+                    <div className="flex max-w-sm flex-col items-center gap-3 px-6 text-center text-sm text-slate-300/75">
+                      <SmartphoneIcon className="size-8 text-slate-200/55" />
+                      <p>
+                        {selectedDevice
+                          ? "Boot the selected simulator to start the live interactive view."
+                          : "Choose a simulator device to begin."}
+                      </p>
+                      {selectedDevice && selectedDevice.state !== "booted" ? (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => {
+                            if (!selectedDeviceUdid) {
+                              return;
+                            }
+                            bootMutation.mutate(selectedDeviceUdid);
+                          }}
+                          disabled={bootMutation.isPending}
+                        >
+                          {bootMutation.isPending ? (
+                            <LoaderIcon className="size-3.5 animate-spin" />
+                          ) : (
+                            <PlayIcon className="size-3.5" />
+                          )}
+                          Boot And Open
+                        </Button>
+                      ) : null}
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
 
             <div className="flex shrink-0 items-center justify-center gap-2">
@@ -567,7 +597,7 @@ const SimulatorPanel = memo(function SimulatorPanel({
                 onClick={handleAppSwitcherPress}
                 disabled={!canSendHardwareButton}
                 aria-label="Open the iOS app switcher"
-                className="size-9 rounded-full border border-white/10 bg-white/[0.03] text-slate-200/80 hover:bg-white/10 hover:text-white"
+                className="size-9 rounded-full border border-border/60 bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground"
               >
                 <LayoutGridIcon className="size-4" />
               </Button>
@@ -577,7 +607,7 @@ const SimulatorPanel = memo(function SimulatorPanel({
                 onClick={handleHomePress}
                 disabled={!canSendHardwareButton}
                 aria-label="Press the iOS home button"
-                className="size-9 rounded-full border border-white/10 bg-white/[0.03] text-slate-200/80 hover:bg-white/10 hover:text-white"
+                className="size-9 rounded-full border border-border/60 bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground"
               >
                 <CircleIcon className="size-4" />
               </Button>

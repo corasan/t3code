@@ -20,6 +20,7 @@ export interface H264StreamPlayerOptions {
   readonly streamUrl: string;
   readonly signal?: AbortSignal;
   readonly onFirstFrame?: () => void;
+  readonly onDimensions?: (width: number, height: number) => void;
   readonly onError?: (error: Error) => void;
 }
 
@@ -32,7 +33,7 @@ export function isH264StreamPlayerSupported(): boolean {
 }
 
 export function startH264StreamPlayer(options: H264StreamPlayerOptions): H264StreamPlayerHandle {
-  const { canvas, streamUrl, signal, onFirstFrame, onError } = options;
+  const { canvas, streamUrl, signal, onFirstFrame, onDimensions, onError } = options;
   if (!isH264StreamPlayerSupported()) {
     const error = new Error("WebCodecs VideoDecoder is not available in this browser.");
     queueMicrotask(() => onError?.(error));
@@ -63,6 +64,8 @@ export function startH264StreamPlayer(options: H264StreamPlayerOptions): H264Str
   // do >1 `drawImage` per displayed frame.
   let pendingFrame: VideoFrame | null = null;
   let rafHandle = 0;
+  let lastReportedWidth = 0;
+  let lastReportedHeight = 0;
 
   const drawPendingFrame = () => {
     rafHandle = 0;
@@ -77,6 +80,14 @@ export function startH264StreamPlayer(options: H264StreamPlayerOptions): H264Str
       }
       if (canvas.height !== frame.displayHeight) {
         canvas.height = frame.displayHeight;
+      }
+      if (
+        frame.displayWidth !== lastReportedWidth ||
+        frame.displayHeight !== lastReportedHeight
+      ) {
+        lastReportedWidth = frame.displayWidth;
+        lastReportedHeight = frame.displayHeight;
+        onDimensions?.(frame.displayWidth, frame.displayHeight);
       }
       context.drawImage(frame, 0, 0);
       if (!firstFrameAnnounced) {
