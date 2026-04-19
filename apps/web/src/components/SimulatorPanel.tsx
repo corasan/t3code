@@ -105,14 +105,13 @@ const SimulatorPanel = memo(function SimulatorPanel({
   // (no letterbox bars) and the sidebar width hugs the phone exactly.
   const [streamAspect, setStreamAspect] = useState<number | null>(null);
 
-  const simulatorStateQuery = useQuery({
-    ...iosSimulatorStateQueryOptions({
+  const simulatorStateQuery = useQuery(
+    iosSimulatorStateQueryOptions({
       environmentId,
       cwd: projectCwd,
       enabled: projectCwd !== null,
     }),
-    refetchInterval: 3_000,
-  });
+  );
 
   const simulatorState = simulatorStateQuery.data ?? null;
   const devices = simulatorState?.devices ?? EMPTY_IOS_SIMULATOR_DEVICES;
@@ -204,7 +203,6 @@ const SimulatorPanel = memo(function SimulatorPanel({
     if (!canvas || !streamUrl) {
       return;
     }
-    setStreamAspect(null);
     const player = startH264StreamPlayer({
       canvas,
       streamUrl,
@@ -420,14 +418,9 @@ const SimulatorPanel = memo(function SimulatorPanel({
               void invalidateSimulatorState();
             }}
             aria-label="Refresh Simulator"
-            disabled={simulatorStateQuery.isFetching}
             className="text-muted-foreground/50 hover:text-foreground/70"
           >
-            {simulatorStateQuery.isFetching ? (
-              <LoaderIcon className="size-3.5 animate-spin" />
-            ) : (
-              <RefreshCcwIcon className="size-3.5" />
-            )}
+            <RefreshCcwIcon className="size-3.5" />
           </Button>
           <Button
             size="icon-xs"
@@ -535,7 +528,6 @@ const SimulatorPanel = memo(function SimulatorPanel({
                   ) : null}
                   {canRenderStream ? (
                     <canvas
-                      key={streamUrl}
                       ref={viewportRef}
                       aria-label="Live iOS Simulator stream"
                       role="img"

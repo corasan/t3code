@@ -71,6 +71,11 @@ final class DeviceStreamer {
     private var compressionSession: VTCompressionSession?
     private var timer: DispatchSourceTimer?
     private var lastSeed: UInt32?
+    private var lastEncodeAt: CFAbsoluteTime = 0
+    // Emit a keepalive frame this often when the simulator screen is static.
+    // Keeps the encoded stream flowing so the Node-side stall watchdog
+    // doesn't tear the session down while the user is idle.
+    private let keepaliveInterval: CFAbsoluteTime = 2.0
     private var frameIndex: Int64 = 0
     private var scratchPacket = Data(capacity: 256 * 1024)
 
@@ -207,10 +212,14 @@ final class DeviceStreamer {
         }
 
         let currentSeed = IOSurfaceGetSeed(surface)
-        if !force && currentSeed == lastSeed {
+        let now = CFAbsoluteTimeGetCurrent()
+        let seedChanged = currentSeed != lastSeed
+        let keepalive = !seedChanged && now - lastEncodeAt >= keepaliveInterval
+        if !force && !seedChanged && !keepalive {
             return
         }
         lastSeed = currentSeed
+        lastEncodeAt = now
 
         var unmanagedPixelBuffer: Unmanaged<CVPixelBuffer>?
         let status = CVPixelBufferCreateWithIOSurface(
@@ -228,9 +237,10 @@ final class DeviceStreamer {
         frameIndex += 1
 
         // Tell the encoder to emit a fresh keyframe for the forced first
-        // frame — or when a previous tick dropped a delta under backpressure
-        // — so the client can configure or resync its decoder immediately.
-        let forceKeyframe = force || takeNeedsKeyframe()
+        // frame, keepalive ticks, or when a previous tick dropped a delta
+        // under backpressure — so the client can configure or resync its
+        // decoder immediately.
+        let forceKeyframe = force || keepalive || takeNeedsKeyframe()
         var frameProperties: CFDictionary?
         if forceKeyframe {
             frameProperties = [
