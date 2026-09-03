@@ -232,6 +232,5 @@ thread that started. The new thread keeps the selected workspace mode and base b
 worktree** is selected, each background thread creates its own worktree.
 
 Worktrees live inside the T3 Code data folder by default. To keep them somewhere else, set
-**Settings → General → Worktree directory**. A leading `~` expands to your home folder, and a
-relative path resolves from the project root, so each project keeps its worktrees beside itself.
-Worktrees that already exist stay where they are.
+**Settings → General → Worktree directory**. The path must be absolute or start with `~`, which
+expands to your home folder. Worktrees that already exist stay where they are.

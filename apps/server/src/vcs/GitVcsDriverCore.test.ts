@@ -1,5 +1,3 @@
-import * as NodeOS from "node:os";
-
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, describe } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -19,11 +17,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { GitCommandError, type ReviewDiffFileContentsInput } from "@t3tools/contracts";
 import { ServerConfig } from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import {
-  makeGitVcsDriverCore,
-  resolveWorktreesRoot,
-  splitNullSeparatedGitStdoutPaths,
-} from "./GitVcsDriverCore.ts";
+import { makeGitVcsDriverCore, splitNullSeparatedGitStdoutPaths } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 
 const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -642,63 +636,6 @@ it.effect("backs off failed upstream refreshes across linked worktrees", () =>
     }),
   ).pipe(Effect.provide(CoreDepsLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
-
-describe("resolveWorktreesRoot", () => {
-  const withPathService = (
-    body: (pathService: Path.Path) => void,
-  ): Effect.Effect<void, never, never> =>
-    Effect.gen(function* () {
-      body(yield* Path.Path);
-    }).pipe(Effect.provide(NodeServices.layer));
-
-  it.effect("keeps the fallback when nothing is configured", () =>
-    withPathService((pathService) => {
-      assert.equal(
-        resolveWorktreesRoot(
-          { configured: "  ", fallback: "/t3/worktrees", projectCwd: "/repos/app" },
-          pathService,
-        ),
-        "/t3/worktrees",
-      );
-    }),
-  );
-
-  it.effect("expands a leading tilde to the home directory", () =>
-    withPathService((pathService) => {
-      assert.equal(
-        resolveWorktreesRoot(
-          { configured: "~/worktrees", fallback: "/t3/worktrees", projectCwd: "/repos/app" },
-          pathService,
-        ),
-        pathService.join(NodeOS.homedir(), "worktrees"),
-      );
-    }),
-  );
-
-  it.effect("resolves a relative directory from the project root", () =>
-    withPathService((pathService) => {
-      assert.equal(
-        resolveWorktreesRoot(
-          { configured: "../trees", fallback: "/t3/worktrees", projectCwd: "/repos/app" },
-          pathService,
-        ),
-        pathService.resolve("/repos", "trees"),
-      );
-    }),
-  );
-
-  it.effect("keeps an absolute directory as written", () =>
-    withPathService((pathService) => {
-      assert.equal(
-        resolveWorktreesRoot(
-          { configured: "/mnt/trees", fallback: "/t3/worktrees", projectCwd: "/repos/app" },
-          pathService,
-        ),
-        "/mnt/trees",
-      );
-    }),
-  );
-});
 
 it.effect("creates worktrees under the configured worktree directory", () =>
   Effect.scoped(

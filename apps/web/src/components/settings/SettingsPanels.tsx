@@ -2564,7 +2564,7 @@ export function GeneralSettingsPanel() {
         <SettingsRow
           serverScoped
           {...searchableSetting("worktree-directory")}
-          description="Leave empty to keep worktrees inside the T3 data folder. A relative path resolves from the project root."
+          description="Leave empty to keep worktrees inside the T3 data folder. Use an absolute path or one that starts with ~."
           resetAction={
             settings.worktreeDirectory !== DEFAULT_UNIFIED_SETTINGS.worktreeDirectory ? (
               <SettingResetButton

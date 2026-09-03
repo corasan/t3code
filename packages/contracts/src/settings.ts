@@ -472,6 +472,9 @@ export type CodexSettings = typeof CodexSettings.Type;
 // the update that introduced it.
 const CLAUDE_AUTO_COMPACT_WINDOW_PATTERN = /^(?:|[1-9]\d{5}|1000000)$/;
 
+const WORKTREE_DIRECTORY_PATTERN = /^(?:|~(?:[\\/].*)?|\/.*|[A-Za-z]:[\\/].*|\\\\[^\\]+\\.*)$/;
+const WorktreeDirectory = TrimmedString.check(Schema.isPattern(WORKTREE_DIRECTORY_PATTERN));
+
 export const ClaudeSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -860,7 +863,7 @@ export const ServerSettings = Schema.Struct({
   newWorktreesStartFromOrigin: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
-  worktreeDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  worktreeDirectory: WorktreeDirectory.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   addProjectBaseDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   textGenerationModelSelection: ModelSelection.pipe(
     Schema.withDecodingDefault(
@@ -1080,7 +1083,7 @@ export const ServerSettingsPatch = Schema.Struct({
   environmentIcon: Schema.optionalKey(Schema.NullOr(EnvironmentMachineKind)),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
-  worktreeDirectory: Schema.optionalKey(TrimmedString),
+  worktreeDirectory: Schema.optionalKey(WorktreeDirectory),
   addProjectBaseDirectory: Schema.optionalKey(TrimmedString),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
   sourceControlWritingStyle: Schema.optionalKey(

@@ -37,8 +37,8 @@ import {
   parseRemoteRefWithRemoteNames,
 } from "../git/remoteRefs.ts";
 import { ServerConfig } from "../config.ts";
-import { expandHomePathWith } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { resolveWorktreesRoot } from "./WorktreesRoot.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 // `git worktree add` checks out the full tree, so on large repositories it can
@@ -717,30 +717,6 @@ const collectOutput = Effect.fnUntraced(function* (
     truncated,
   };
 });
-
-/**
- * Resolve the directory that holds generated worktrees. An empty `configured`
- * value keeps the built-in `<t3 home>/worktrees` fallback, a leading `~`
- * expands to the home directory, and anything else resolves against the
- * project root so a relative setting follows each project.
- */
-export function resolveWorktreesRoot(
-  input: {
-    readonly configured: string;
-    readonly fallback: string;
-    readonly projectCwd: string;
-  },
-  path: Path.Path,
-): string {
-  const configured = input.configured.trim();
-  if (configured === "") {
-    return input.fallback;
-  }
-  if (configured.startsWith("~")) {
-    return expandHomePathWith(configured, path);
-  }
-  return path.resolve(input.projectCwd, configured);
-}
 
 export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -2877,7 +2853,6 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           {
             configured: (yield* readSettingsForWorktree(input.cwd)).worktreeDirectory,
             fallback: worktreesDir,
-            projectCwd: input.cwd,
           },
           path,
         ),
