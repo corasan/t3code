@@ -16,8 +16,10 @@ import {
 } from "@t3tools/contracts";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import { resolveWorktreesRoot } from "../vcs/WorktreesRoot.ts";
 
 export class ReviewService extends Context.Service<
   ReviewService,
@@ -37,6 +39,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const vcsRegistry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const git = yield* GitVcsDriver.GitVcsDriver;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
 
   const canonicalizePath = (value: string) => {
     const resolvedPath = path.resolve(value);
@@ -66,13 +69,30 @@ export const make = Effect.gen(function* () {
     operation: "ReviewService.getDiffPreview" | "ReviewService.getDiffFileContents",
     cwd: string,
   ) {
-    const [candidate, workspaceRoot, worktreesRoot] = yield* Effect.all([
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError(
+        (cause) =>
+          new VcsRepositoryDetectionError({
+            operation: "ReviewService.assertWorkspaceBoundCwd.readSettings",
+            cwd,
+            detail: "Failed to read server settings while validating the review workspace.",
+            cause,
+          }),
+      ),
+    );
+    const [candidate, ...roots] = yield* Effect.all([
       canonicalizePath(cwd),
       canonicalizePath(config.cwd),
       canonicalizePath(config.worktreesDir),
+      canonicalizePath(
+        resolveWorktreesRoot(
+          { configured: settings.worktreeDirectory, fallback: config.worktreesDir },
+          path,
+        ),
+      ),
     ]);
 
-    if (isWithinRoot(candidate, workspaceRoot) || isWithinRoot(candidate, worktreesRoot)) {
+    if (roots.some((root) => isWithinRoot(candidate, root))) {
       return;
     }
 

@@ -256,6 +256,21 @@ describe("ServerSettings thread settlement", () => {
   });
 });
 
+describe("ServerSettings worktree directory", () => {
+  it.each(["", "~/worktrees", "/mnt/trees", "C:\\trees", "\\\\server\\share"])(
+    "accepts %j",
+    (value) => {
+      expect(decodeServerSettings({ worktreeDirectory: value }).worktreeDirectory).toBe(value);
+      expect(decodeServerSettingsPatch({ worktreeDirectory: value }).worktreeDirectory).toBe(value);
+    },
+  );
+
+  it.each(["foo/bar", "../trees"])("rejects the relative path %j", (value) => {
+    expect(() => decodeServerSettings({ worktreeDirectory: value })).toThrow();
+    expect(() => decodeServerSettingsPatch({ worktreeDirectory: value })).toThrow();
+  });
+});
+
 describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("defaults text generation to Luna at low reasoning effort", () => {
     expect(DEFAULT_SERVER_SETTINGS.textGenerationModelSelection).toEqual({

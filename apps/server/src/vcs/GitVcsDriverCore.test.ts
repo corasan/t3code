@@ -16,14 +16,16 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { GitCommandError, type ReviewDiffFileContentsInput } from "@t3tools/contracts";
 import { ServerConfig } from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { makeGitVcsDriverCore, splitNullSeparatedGitStdoutPaths } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 
 const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-git-vcs-driver-test-",
 });
+const CoreDepsLayer = Layer.mergeAll(ServerConfigLayer, ServerSettings.layerTest());
 const TestLayer = GitVcsDriver.layer.pipe(
-  Layer.provide(ServerConfigLayer),
+  Layer.provide(CoreDepsLayer),
   Layer.provideMerge(NodeServices.layer),
 );
 
@@ -147,7 +149,7 @@ it.effect("uses stable diagnostics for every parsed non-repository command", () 
     Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
   );
   const layer = GitVcsDriver.layer.pipe(
-    Layer.provide(ServerConfigLayer),
+    Layer.provide(CoreDepsLayer),
     Layer.provideMerge(nodeServicesLayer),
   );
 
@@ -321,7 +323,7 @@ it.effect("coalesces concurrent ref pages into one repository snapshot", () =>
         2,
       );
     }),
-  ).pipe(Effect.provide(ServerConfigLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
+  ).pipe(Effect.provide(CoreDepsLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
 it.effect("retries an in-flight ref snapshot invalidated by a mutation", () =>
@@ -380,7 +382,7 @@ it.effect("retries an in-flight ref snapshot invalidated by a mutation", () =>
       assert.isTrue(refs.refs.some((ref) => ref.name === "feature/during-refresh"));
       assert.equal(yield* Ref.get(refScans), 2);
     }),
-  ).pipe(Effect.provide(ServerConfigLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
+  ).pipe(Effect.provide(CoreDepsLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
 it.effect("invalidates a ref snapshot when a mutation fails after changing Git", () =>
@@ -412,7 +414,7 @@ it.effect("invalidates a ref snapshot when a mutation fails after changing Git",
       const refs = yield* driver.listRefs({ cwd });
       assert.isTrue(refs.refs.some((ref) => ref.name === "feature/partial-failure"));
     }),
-  ).pipe(Effect.provide(ServerConfigLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
+  ).pipe(Effect.provide(CoreDepsLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
 it.effect("fails a ref snapshot when for-each-ref exits unsuccessfully", () =>
@@ -448,7 +450,7 @@ it.effect("fails a ref snapshot when for-each-ref exits unsuccessfully", () =>
       });
       assert.equal(yield* Ref.get(snapshotAttempts), 1);
     }),
-  ).pipe(Effect.provide(ServerConfigLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
+  ).pipe(Effect.provide(CoreDepsLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
 it.effect("marks the current branch when worktree metadata is unavailable", () =>
@@ -483,7 +485,7 @@ it.effect("marks the current branch when worktree metadata is unavailable", () =
       assert.isTrue(refs.isRepo);
       assert.isTrue(refs.refs.find((ref) => ref.name === initialBranch)?.current);
     }),
-  ).pipe(Effect.provide(ServerConfigLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
+  ).pipe(Effect.provide(CoreDepsLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
 it.effect("ignores worktree metadata for directories that no longer exist", () =>
@@ -519,7 +521,7 @@ it.effect("ignores worktree metadata for directories that no longer exist", () =
 
       assert.equal(refs.refs.find((ref) => ref.name === "stale-worktree")?.worktreePath, null);
     }),
-  ).pipe(Effect.provide(ServerConfigLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
+  ).pipe(Effect.provide(CoreDepsLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
 it.effect("refreshes the current branch after an external checkout", () =>
@@ -632,7 +634,44 @@ it.effect("backs off failed upstream refreshes across linked worktrees", () =>
       yield* driver.statusDetailsRemote(cwd);
       assert.equal(yield* Ref.get(fetchAttempts), 3);
     }),
-  ).pipe(Effect.provide(ServerConfigLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
+  ).pipe(Effect.provide(CoreDepsLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("creates worktrees under the configured worktree directory", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const configuredRoot = yield* makeTmpDir("git-vcs-driver-configured-worktrees-");
+      const driver = yield* makeGitVcsDriverCore().pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ServerConfigLayer,
+            ServerSettings.layerTest({ worktreeDirectory: configuredRoot }),
+          ),
+        ),
+      );
+      const cwd = yield* makeTmpDir();
+      const { initialBranch } = yield* initRepoWithCommit(cwd).pipe(
+        Effect.provideService(GitVcsDriver.GitVcsDriver, driver),
+      );
+
+      const created = yield* driver.createWorktree({
+        cwd,
+        path: null,
+        refName: initialBranch,
+        newRefName: "feature/configured-root",
+      });
+
+      const expected = pathService.join(
+        configuredRoot,
+        pathService.basename(cwd),
+        "feature-configured-root",
+      );
+      assert.equal(created.worktree.path, expected);
+      assert.equal(yield* fileSystem.exists(expected), true);
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
@@ -1781,7 +1820,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         );
         const driver = yield* makeGitVcsDriverCore().pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, delayedPushSpawner),
-          Effect.provide(ServerConfigLayer),
+          Effect.provide(CoreDepsLayer),
         );
         const cwd = yield* makeTmpDir();
         const remote = yield* makeTmpDir("git-remote-");

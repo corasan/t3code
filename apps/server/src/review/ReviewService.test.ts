@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 
 import { ServerConfig } from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as ReviewService from "./ReviewService.ts";
@@ -14,6 +15,7 @@ function makeLayer(input: {
   readonly workspaceRoot: string;
   readonly baseDir: string;
   readonly detectCalls?: Array<{ readonly cwd: string }>;
+  readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
 }) {
   return ReviewService.layer.pipe(
     Layer.provide(
@@ -29,6 +31,7 @@ function makeLayer(input: {
     ),
     Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
     Layer.provide(ServerConfig.layerTest(input.workspaceRoot, input.baseDir)),
+    Layer.provide(ServerSettings.layerTest(input.settings)),
     Layer.provideMerge(NodeServices.layer),
   );
 }
@@ -105,6 +108,29 @@ describe("ReviewService", () => {
       assert.strictEqual(result.cwd, workspaceRoot);
       assert.deepStrictEqual(result.sources, []);
       assert.deepStrictEqual(detectCalls, [{ cwd: workspaceRoot }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("accepts diff preview cwd inside the configured worktree directory", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-workspace-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-base-" });
+      const worktreeDirectory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-trees-" });
+      const cwd = `${worktreeDirectory}/repo/feature`;
+      yield* fs.makeDirectory(cwd, { recursive: true });
+      const detectCalls: Array<{ readonly cwd: string }> = [];
+
+      yield* Effect.gen(function* () {
+        const review = yield* ReviewService.ReviewService;
+        return yield* review.getDiffPreview({ cwd });
+      }).pipe(
+        Effect.provide(
+          makeLayer({ workspaceRoot, baseDir, detectCalls, settings: { worktreeDirectory } }),
+        ),
+      );
+
+      assert.deepStrictEqual(detectCalls, [{ cwd }]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
